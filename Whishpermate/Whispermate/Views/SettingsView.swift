@@ -41,6 +41,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case contextRules = "Context Rules"
     case shortcuts = "Shortcuts"
     case history = "History"
+    case support = "Support"
 
     var id: String { rawValue }
 
@@ -75,7 +76,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
             case .primary: return [.general, .history]
             case .dictation: return [.transcription, .overlay, .audio, .language]
             case .text: return [.dictionary, .shortcuts, .contextRules]
-            case .system: return [.permissions]
+            case .system: return [.permissions, .support]
             }
         }
     }
@@ -92,6 +93,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dictionary: return "book.closed"
         case .contextRules: return "text.badge.checkmark"
         case .shortcuts: return "text.word.spacing"
+        case .support: return "questionmark.circle"
         }
     }
 
@@ -108,6 +110,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dictionary: return "Custom word replacements and corrections"
         case .contextRules: return "App-specific formatting rules"
         case .shortcuts: return "Voice-triggered text expansions"
+        case .support: return "Troubleshooting help and contact"
         }
     }
 }
@@ -149,6 +152,9 @@ struct SettingsView: View {
     @State private var isRedeemingReferral = false
     @State private var referralCodeToRedeem = ""
     @State private var referralStatusText: String?
+    @State private var showingSupportPromptCopied = false
+    @State private var showingSupportEmailCopied = false
+    @State private var supportOpenStatusText: String?
     @Environment(\.dismiss) var dismiss
 
     var body: some View {
@@ -354,6 +360,8 @@ struct SettingsView: View {
                 contextRulesSection
             case .shortcuts:
                 shortcutsSection
+            case .support:
+                supportSection
             }
         }
         .padding(.horizontal, 20)
@@ -1578,6 +1586,148 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             ShortcutsTabView(manager: shortcutManager)
         }
+    }
+
+    // MARK: - Support Section
+
+    private var supportSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            groupHeader("Troubleshoot with an AI Agent")
+
+            SettingsCard {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Troubleshooting Prompt")
+                                .dsFont(.body)
+                                .foregroundStyle(Color.dsForeground)
+                            Text("Opens an AI app installed on this Mac with a ready-made prompt, so it can look at this computer and help fix the problem.")
+                                .dsFont(.label)
+                                .foregroundStyle(Color.dsMutedForeground)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        Button {
+                            copySupportPrompt()
+                        } label: {
+                            Label(
+                                showingSupportPromptCopied ? "Copied" : "Copy Prompt",
+                                systemImage: showingSupportPromptCopied ? "checkmark" : "doc.on.doc"
+                            )
+                        }
+                        .controlSize(.small)
+                    }
+                    .padding(.vertical, 2)
+
+                    Divider()
+                        .padding(.vertical, 6)
+
+                    // Adaptive grid so the buttons sit in one row when the
+                    // window is wide and wrap to two columns when it is narrow.
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 150), spacing: 8)],
+                        alignment: .leading,
+                        spacing: 8
+                    ) {
+                        ForEach(SupportPromptManager.Destination.allCases) { destination in
+                            Button {
+                                openSupportPrompt(in: destination)
+                            } label: {
+                                Label("Open in \(destination.rawValue)", systemImage: "arrow.up.forward.square")
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(.vertical, 2)
+
+                    if let supportOpenStatusText {
+                        Text(supportOpenStatusText)
+                            .dsFont(.label)
+                            .foregroundStyle(Color.dsMutedForeground)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.top, 6)
+                    }
+                }
+            }
+
+            groupHeader("Contact")
+
+            SettingsCard {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Email Support")
+                            .dsFont(.body)
+                            .foregroundStyle(Color.dsForeground)
+                        if let mailURL = SupportContent.mailURL {
+                            Link(SupportContent.email, destination: mailURL)
+                                .dsFont(.label)
+                        } else {
+                            Text(SupportContent.email)
+                                .dsFont(.label)
+                                .foregroundStyle(Color.dsMutedForeground)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    Spacer()
+                    Button {
+                        copySupportEmail()
+                    } label: {
+                        Label(
+                            showingSupportEmailCopied ? "Copied" : "Copy Email",
+                            systemImage: showingSupportEmailCopied ? "checkmark" : "doc.on.doc"
+                        )
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
+    private func copySupportPrompt() {
+        SupportPromptManager.shared.copyPrompt()
+        showingSupportPromptCopied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            showingSupportPromptCopied = false
+        }
+    }
+
+    /// Opens the installed desktop app and pastes the prompt into its chat.
+    /// Nothing opens when the app isn't installed; the manager copies the
+    /// prompt first so it is on the clipboard either way.
+    private func openSupportPrompt(in destination: SupportPromptManager.Destination) {
+        let name = destination.rawValue
+        supportOpenStatusText = "Opening \(name)…"
+
+        SupportPromptManager.shared.open(destination) { outcome in
+            switch outcome {
+            case .openedApp(pasted: true):
+                supportOpenStatusText = "Prompt pasted into \(name). It's also on your clipboard."
+            case .openedApp(pasted: false):
+                supportOpenStatusText = "\(name) is open, but the prompt couldn't be pasted automatically. It's on your clipboard."
+            case .appNotInstalled:
+                supportOpenStatusText = "The \(name) app isn't installed on this Mac. Prompt copied to the clipboard."
+            case .failed:
+                supportOpenStatusText = "Couldn't open \(name). Prompt copied to the clipboard."
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                supportOpenStatusText = nil
+            }
+        }
+    }
+
+    private func copySupportEmail() {
+        copyToPasteboard(SupportContent.email)
+        showingSupportEmailCopied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            showingSupportEmailCopied = false
+        }
+    }
+
+    private func copyToPasteboard(_ string: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(string, forType: .string)
     }
 
     // MARK: - Helper Functions

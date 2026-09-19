@@ -1651,6 +1651,55 @@ struct SettingsView: View {
                 }
             }
 
+            groupHeader("GitHub")
+
+            SettingsCard {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Report a Problem")
+                                .dsFont(.body)
+                                .foregroundStyle(Color.dsForeground)
+                            Text("Search existing reports first, then open an issue with the steps to reproduce. Don't include recordings, transcripts, or credentials.")
+                                .dsFont(.label)
+                                .foregroundStyle(Color.dsMutedForeground)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        if let newIssueURL = SupportContent.newIssueURL {
+                            Link(destination: newIssueURL) {
+                                Label("Open Issue", systemImage: "exclamationmark.bubble")
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(.vertical, 2)
+
+                    Divider()
+                        .padding(.vertical, 6)
+
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Submit a Fix")
+                                .dsFont(.body)
+                                .foregroundStyle(Color.dsForeground)
+                            Text("Fork the repository, create a branch, make and test one focused change, push the branch, then open a pull request against main.")
+                                .dsFont(.label)
+                                .foregroundStyle(Color.dsMutedForeground)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        if let contributionGuideURL = SupportContent.contributionGuideURL {
+                            Link(destination: contributionGuideURL) {
+                                Label("Pull Request Guide", systemImage: "arrow.triangle.branch")
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+
             groupHeader("Contact")
 
             SettingsCard {

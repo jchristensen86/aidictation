@@ -12,6 +12,14 @@ enum SupportContent {
         URL(string: "mailto:\(email)")
     }
 
+    static var newIssueURL: URL? {
+        URL(string: "https://github.com/writingmate/aidictation/issues/new")
+    }
+
+    static var pullRequestURL: URL? {
+        URL(string: "https://github.com/writingmate/aidictation/pulls")
+    }
+
     /// Prompt users hand to an AI coding agent (Cursor, Claude, etc.) so it
     /// investigates a problem on this machine in a safe, step-by-step way.
     /// This wording is locked by Support; do not edit without their sign-off.

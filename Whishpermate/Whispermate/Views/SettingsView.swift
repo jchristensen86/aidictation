@@ -1638,7 +1638,11 @@ struct SettingsView: View {
                         Button {
                             copySupportEmail()
                         } label: {
-                            Image(systemName: showingSupportEmailCopied ? "checkmark" : "doc.on.doc")
+                            Text("Copy Email")
+                                .hidden()
+                                .overlay {
+                                    Text(showingSupportEmailCopied ? "Copied" : "Copy Email")
+                                }
                         }
                         .help(showingSupportEmailCopied ? "Copied" : "Copy Email Address")
                         .accessibilityLabel(showingSupportEmailCopied ? "Email Address Copied" : "Copy Email Address")
@@ -1663,10 +1667,7 @@ struct SettingsView: View {
                         }
                         Spacer()
                         if let newIssueURL = SupportContent.newIssueURL {
-                            Link(destination: newIssueURL) {
-                                Label("Open Issue", systemImage: "arrow.up.right")
-                            }
-                            .controlSize(.small)
+                            Link("Open Issue", destination: newIssueURL)
                         }
                     }
                     .padding(.vertical, 2)
@@ -1686,10 +1687,7 @@ struct SettingsView: View {
                         }
                         Spacer()
                         if let pullRequestURL = SupportContent.pullRequestURL {
-                            Link(destination: pullRequestURL) {
-                                Label("View Pull Requests", systemImage: "arrow.up.right")
-                            }
-                            .controlSize(.small)
+                            Link("View Pull Requests", destination: pullRequestURL)
                         }
                     }
                     .padding(.vertical, 2)
@@ -1721,10 +1719,16 @@ struct SettingsView: View {
                 }
                 .help("Open troubleshooting instructions in \(destination.rawValue)")
             }
-            Button(showingSupportPromptCopied ? "Copied" : "Copy Prompt") {
+            Button {
                 copySupportPrompt()
+            } label: {
+                Text("Copy Prompt")
+                    .hidden()
+                    .overlay {
+                        Text(showingSupportPromptCopied ? "Copied" : "Copy Prompt")
+                    }
             }
-            .buttonStyle(.borderless)
+            .accessibilityLabel(showingSupportPromptCopied ? "Prompt Copied" : "Copy Prompt")
         }
         .fixedSize()
     }

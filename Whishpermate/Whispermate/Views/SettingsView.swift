@@ -1657,10 +1657,10 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Report a Problem")
+                            Text("Open an Issue")
                                 .dsFont(.body)
                                 .foregroundStyle(Color.dsForeground)
-                            Text("Search existing reports first, then open an issue with the steps to reproduce. Don't include recordings, transcripts, or credentials.")
+                            Text("Report a bug or request a feature.")
                                 .dsFont(.label)
                                 .foregroundStyle(Color.dsMutedForeground)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1680,18 +1680,18 @@ struct SettingsView: View {
 
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Submit a Fix")
+                            Text("Open a Pull Request")
                                 .dsFont(.body)
                                 .foregroundStyle(Color.dsForeground)
-                            Text("Fork the repository, create a branch, make and test one focused change, push the branch, then open a pull request against main.")
+                            Text("Contribute a fix or improvement.")
                                 .dsFont(.label)
                                 .foregroundStyle(Color.dsMutedForeground)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         Spacer()
-                        if let contributionGuideURL = SupportContent.contributionGuideURL {
-                            Link(destination: contributionGuideURL) {
-                                Label("Pull Request Guide", systemImage: "arrow.triangle.branch")
+                        if let pullRequestURL = SupportContent.pullRequestURL {
+                            Link(destination: pullRequestURL) {
+                                Label("Open Pull Request", systemImage: "arrow.triangle.branch")
                             }
                             .controlSize(.small)
                         }

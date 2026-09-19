@@ -16,8 +16,8 @@ enum SupportContent {
         URL(string: "https://github.com/writingmate/aidictation/issues/new")
     }
 
-    static var contributionGuideURL: URL? {
-        URL(string: "https://github.com/writingmate/aidictation/blob/main/CONTRIBUTING.md")
+    static var pullRequestURL: URL? {
+        URL(string: "https://github.com/writingmate/aidictation/compare")
     }
 
     /// Prompt users hand to an AI coding agent (Cursor, Claude, etc.) so it

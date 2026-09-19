@@ -17,7 +17,7 @@ enum SupportContent {
     }
 
     static var pullRequestURL: URL? {
-        URL(string: "https://github.com/writingmate/aidictation/compare")
+        URL(string: "https://github.com/writingmate/aidictation/pulls")
     }
 
     /// Prompt users hand to an AI coding agent (Cursor, Claude, etc.) so it

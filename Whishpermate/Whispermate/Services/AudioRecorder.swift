@@ -434,29 +434,6 @@ class AudioRecorder: NSObject, ObservableObject {
         return true
     }
 
-    /// Points the engine's HAL unit at one exact input device.
-    ///
-    /// Without this the unit keeps whatever device the process resolved
-    /// earlier, including one Core Audio has already destroyed.
-    private static func bindInputDevice(_ deviceID: AudioDeviceID, on inputNode: AVAudioInputNode) {
-        guard let audioUnit = inputNode.audioUnit else { return }
-        var deviceID = deviceID
-        let status = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        if status != noErr {
-            DebugLog.error(
-                "Failed to bind input device \(deviceID): \(status)",
-                context: "AudioRecorder"
-            )
-        }
-    }
-
     private func prepareCapture(
         _ preparation: MacCapturePreparation,
         deviceSnapshot: AudioDeviceManager.CaptureSelectionSnapshot
@@ -481,16 +458,15 @@ class AudioRecorder: NSObject, ObservableObject {
         guard preparation.attempt.isPending else { return }
 
         let bus = 0
-        // Bind the engine to the device we just resolved. Left to itself the
-        // input node inherits whatever device this process last resolved, and
-        // that can be a destroyed aggregate — unplugging a display tears one
-        // down while the cached ID lives on, so every later engine fails to
-        // create an IOProc and reports a zero-channel format. Binding
-        // explicitly, and rebuilding once if the format still looks dead,
-        // keeps a route change from wedging capture until the app restarts.
+        // The selected device is already the system default, as verified by
+        // resolveCaptureDevice. Leave AVAudioEngine's HAL unit untouched so it
+        // can retain the private aggregate it builds around that device. A
+        // direct CurrentDevice bind replaces the aggregate with raw hardware
+        // and can leave the tap and hardware at incompatible sample rates.
+        // Rebuild once without binding if Core Audio initially reports a dead
+        // format after a route change.
         var engine = AVAudioEngine()
         var inputNode = engine.inputNode
-        Self.bindInputDevice(deviceResolution.device.id, on: inputNode)
         var inputFormat = inputNode.outputFormat(forBus: bus)
         if inputFormat.channelCount == 0 {
             DebugLog.error(
@@ -500,7 +476,6 @@ class AudioRecorder: NSObject, ObservableObject {
             SentryTelemetry.recordAudioEngineEvent("input_format_retry")
             engine = AVAudioEngine()
             inputNode = engine.inputNode
-            Self.bindInputDevice(deviceResolution.device.id, on: inputNode)
             inputFormat = inputNode.outputFormat(forBus: bus)
         }
         guard inputFormat.channelCount > 0,

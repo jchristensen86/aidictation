@@ -1592,51 +1592,20 @@ struct SettingsView: View {
 
     private var supportSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            groupHeader("Troubleshoot with an AI Agent")
+            groupHeader("Get Help")
 
             SettingsCard {
                 VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Troubleshooting Prompt")
-                                .dsFont(.body)
-                                .foregroundStyle(Color.dsForeground)
-                            Text("Opens an AI app installed on this Mac with a ready-made prompt, so it can look at this computer and help fix the problem.")
-                                .dsFont(.label)
-                                .foregroundStyle(Color.dsMutedForeground)
-                                .fixedSize(horizontal: false, vertical: true)
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 20) {
+                            supportTroubleshootingLabel
+                                .frame(minWidth: 220, alignment: .leading)
+                            Spacer(minLength: 0)
+                            supportTroubleshootingActions
                         }
-                        Spacer()
-                        Button {
-                            copySupportPrompt()
-                        } label: {
-                            Label(
-                                showingSupportPromptCopied ? "Copied" : "Copy Prompt",
-                                systemImage: showingSupportPromptCopied ? "checkmark" : "doc.on.doc"
-                            )
-                        }
-                        .controlSize(.small)
-                    }
-                    .padding(.vertical, 2)
-
-                    Divider()
-                        .padding(.vertical, 6)
-
-                    // Adaptive grid so the buttons sit in one row when the
-                    // window is wide and wrap to two columns when it is narrow.
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 150), spacing: 8)],
-                        alignment: .leading,
-                        spacing: 8
-                    ) {
-                        ForEach(SupportPromptManager.Destination.allCases) { destination in
-                            Button {
-                                openSupportPrompt(in: destination)
-                            } label: {
-                                Label("Open in \(destination.rawValue)", systemImage: "arrow.up.forward.square")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .controlSize(.small)
+                        VStack(alignment: .leading, spacing: 10) {
+                            supportTroubleshootingLabel
+                            supportTroubleshootingActions
                         }
                     }
                     .padding(.vertical, 2)
@@ -1648,6 +1617,33 @@ struct SettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.top, 6)
                     }
+
+                    Divider()
+                        .padding(.vertical, 8)
+
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Contact Support")
+                                .dsFont(.body)
+                                .foregroundStyle(Color.dsForeground)
+                            Text(SupportContent.email)
+                                .dsFont(.label)
+                                .foregroundStyle(Color.dsMutedForeground)
+                                .textSelection(.enabled)
+                        }
+                        Spacer()
+                        if let mailURL = SupportContent.mailURL {
+                            Link("Email Support", destination: mailURL)
+                        }
+                        Button {
+                            copySupportEmail()
+                        } label: {
+                            Image(systemName: showingSupportEmailCopied ? "checkmark" : "doc.on.doc")
+                        }
+                        .help(showingSupportEmailCopied ? "Copied" : "Copy Email Address")
+                        .accessibilityLabel(showingSupportEmailCopied ? "Email Address Copied" : "Copy Email Address")
+                    }
+                    .padding(.vertical, 2)
                 }
             }
 
@@ -1657,10 +1653,10 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Open an Issue")
+                            Text("Report a Problem")
                                 .dsFont(.body)
                                 .foregroundStyle(Color.dsForeground)
-                            Text("Report a bug or request a feature.")
+                            Text("Bugs and feature requests.")
                                 .dsFont(.label)
                                 .foregroundStyle(Color.dsMutedForeground)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1668,7 +1664,7 @@ struct SettingsView: View {
                         Spacer()
                         if let newIssueURL = SupportContent.newIssueURL {
                             Link(destination: newIssueURL) {
-                                Label("Open Issue", systemImage: "exclamationmark.bubble")
+                                Label("Open Issue", systemImage: "arrow.up.right")
                             }
                             .controlSize(.small)
                         }
@@ -1680,10 +1676,10 @@ struct SettingsView: View {
 
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Open a Pull Request")
+                            Text("Contribute")
                                 .dsFont(.body)
                                 .foregroundStyle(Color.dsForeground)
-                            Text("Contribute a fix or improvement.")
+                            Text("Fixes and improvements.")
                                 .dsFont(.label)
                                 .foregroundStyle(Color.dsMutedForeground)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1691,7 +1687,7 @@ struct SettingsView: View {
                         Spacer()
                         if let pullRequestURL = SupportContent.pullRequestURL {
                             Link(destination: pullRequestURL) {
-                                Label("Open Pull Request", systemImage: "arrow.triangle.branch")
+                                Label("View Pull Requests", systemImage: "arrow.up.right")
                             }
                             .controlSize(.small)
                         }
@@ -1700,38 +1696,37 @@ struct SettingsView: View {
                 }
             }
 
-            groupHeader("Contact")
-
-            SettingsCard {
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Email Support")
-                            .dsFont(.body)
-                            .foregroundStyle(Color.dsForeground)
-                        if let mailURL = SupportContent.mailURL {
-                            Link(SupportContent.email, destination: mailURL)
-                                .dsFont(.label)
-                        } else {
-                            Text(SupportContent.email)
-                                .dsFont(.label)
-                                .foregroundStyle(Color.dsMutedForeground)
-                                .textSelection(.enabled)
-                        }
-                    }
-                    Spacer()
-                    Button {
-                        copySupportEmail()
-                    } label: {
-                        Label(
-                            showingSupportEmailCopied ? "Copied" : "Copy Email",
-                            systemImage: showingSupportEmailCopied ? "checkmark" : "doc.on.doc"
-                        )
-                    }
-                    .controlSize(.small)
-                }
-                .padding(.vertical, 2)
-            }
         }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+    }
+
+    private var supportTroubleshootingLabel: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Troubleshoot with AI")
+                .dsFont(.body)
+                .foregroundStyle(Color.dsForeground)
+            Text("Open an installed AI app with troubleshooting instructions.")
+                .dsFont(.label)
+                .foregroundStyle(Color.dsMutedForeground)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var supportTroubleshootingActions: some View {
+        HStack(spacing: 8) {
+            ForEach(SupportPromptManager.Destination.allCases) { destination in
+                Button(destination.rawValue) {
+                    openSupportPrompt(in: destination)
+                }
+                .help("Open troubleshooting instructions in \(destination.rawValue)")
+            }
+            Button(showingSupportPromptCopied ? "Copied" : "Copy Prompt") {
+                copySupportPrompt()
+            }
+            .buttonStyle(.borderless)
+        }
+        .fixedSize()
     }
 
     private func copySupportPrompt() {

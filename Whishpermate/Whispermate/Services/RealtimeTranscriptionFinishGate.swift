@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(WhisperMateShared)
+import WhisperMateShared
+#endif
 
 /// Deterministic attempt policy for rebuilding a failed capture graph without
 /// ending the user's recording. Its owner supplies serialization.
@@ -27,58 +30,99 @@ struct MacCaptureRecoveryPolicy {
     }
 }
 
-/// Buffers only an active recording's first PCM chunks while app context resolves.
-/// Overflow disables streaming so recognition falls back to the complete file.
-nonisolated final class MacRealtimeStartupAudio: @unchecked Sendable {
-    typealias Handler = @Sendable (Data) -> Void
-
-    private let lock = NSLock()
+/// Owns a recording's stream before app context is ready, including a stop
+/// that arrives before connection. No audio is captured by this object.
+nonisolated final class MacRealtimeStartupAudio: RealtimeTranscriptionStreaming, @unchecked Sendable {
+    private let queue: DispatchQueue
     private let maximumBytes: Int
+    private let finishGate: RealtimeTranscriptionFinishGate
     private var chunks: [Data] = []
     private var byteCount = 0
-    private var handler: Handler?
-    private var discarded = false
+    private var client: (any RealtimeTranscriptionStreaming)?
+    private var closed = false
+    private var finishDeadline: TimeInterval?
 
     // Two seconds of the recorder's 24 kHz, mono, Int16 streaming format.
     init(maximumBytes: Int = 96_000) {
         self.maximumBytes = maximumBytes
+        let queue = DispatchQueue(label: "ai.writingmate.realtime-startup")
+        self.queue = queue
+        finishGate = RealtimeTranscriptionFinishGate(queue: queue)
     }
 
+    func start() {}
+
+    var isConnected: Bool { queue.sync { client != nil && !closed } }
+
+    func sendAudio(_ chunk: Data) { append(chunk) }
+
     func append(_ chunk: Data) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !discarded else { return }
-        if let handler {
-            handler(chunk)
-        } else if chunk.count <= maximumBytes - byteCount {
-            chunks.append(chunk)
-            byteCount += chunk.count
-        } else {
-            discarded = true
-            chunks.removeAll()
-            byteCount = 0
+        queue.sync {
+            guard !closed, finishDeadline == nil, !chunk.isEmpty else { return }
+            if let client {
+                client.sendAudio(chunk)
+            } else if chunk.count <= maximumBytes - byteCount {
+                chunks.append(chunk)
+                byteCount += chunk.count
+            } else {
+                closeOnQueue()
+            }
         }
     }
 
-    /// The destination must enqueue without blocking or reentering this buffer.
-    /// Holding the lock through replay keeps new chunks behind the saved head.
-    func connect(to handler: @escaping Handler) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !discarded, self.handler == nil else { return false }
-        self.handler = handler
-        for chunk in chunks { handler(chunk) }
-        chunks.removeAll()
-        byteCount = 0
-        return true
+    func connect(to client: any RealtimeTranscriptionStreaming) -> Bool {
+        queue.sync {
+            guard !closed, self.client == nil else { return false }
+            self.client = client
+            client.start()
+            for chunk in chunks { client.sendAudio(chunk) }
+            chunks.removeAll()
+            byteCount = 0
+            if let finishDeadline {
+                client.requestFinish(timeout: max(0, finishDeadline - ProcessInfo.processInfo.systemUptime))
+            }
+            Task { [weak self, client] in
+                let transcript = await client.awaitFinish()
+                self?.queue.async { [weak self] in
+                    self?.finishGate.resolve(with: transcript)
+                }
+            }
+            return true
+        }
+    }
+
+    func requestFinish(timeout: TimeInterval) {
+        queue.sync {
+            guard !closed, finishGate.begin(timeout: timeout, onTimeout: { [weak self] in
+                self?.closeOnQueue()
+            }) else { return }
+            finishDeadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
+            client?.requestFinish(timeout: timeout)
+        }
+    }
+
+    func awaitFinish() async -> String? {
+        await withCheckedContinuation { continuation in
+            queue.async { self.finishGate.wait(continuation) }
+        }
     }
 
     func discardPending() {
-        lock.lock()
-        defer { lock.unlock() }
-        guard handler == nil else { return }
-        discarded = true
+        queue.sync {
+            if client == nil { closeOnQueue() }
+        }
+    }
+
+    func close() {
+        queue.sync { closeOnQueue() }
+    }
+
+    private func closeOnQueue() {
+        guard !closed else { return }
+        closed = true
         chunks.removeAll()
         byteCount = 0
+        client?.close()
+        finishGate.resolve(with: nil)
     }
 }

@@ -65,6 +65,7 @@ class AppState: ObservableObject {
     private var activeCaptureLease: MacAudioProcessingStore.Lease?
     private var activeTranscriptionSnapshot: MacTranscriptionAttemptSnapshot?
     private var attemptContextCapture: (attemptID: UUID, task: Task<MacCapturedAttemptContext?, Never>)?
+    private var capturePreparationTask: (attemptID: UUID, task: Task<Void, Never>)?
     private var captureDeadlineTask: Task<Void, Never>?
     private var retranscriptionAttemptIDs: [UUID: UUID] = [:]
     private var transcriptionTasks: [UUID: Task<Void, Never>] = [:]
@@ -229,14 +230,14 @@ class AppState: ObservableObject {
         // Store previous app for pasting
         ClipboardManager.storePreviousApp()
 
-        Task { [weak self] in
+        capturePreparationTask = (attemptID, Task { [weak self] in
             await self?.beginPreparedCapture(
                 recordingID: recordingID,
                 attemptID: attemptID,
                 attemptSnapshot: attemptSnapshot,
                 shouldShowOverlayControls: shouldShowOverlayControls
             )
-        }
+        })
     }
 
     private func beginAttemptContextCapture() -> Task<MacCapturedAttemptContext?, Never> {
@@ -321,6 +322,9 @@ class AppState: ObservableObject {
             // Retain the head of this recording while context resolves. Capture
             // starts now; the stream still receives its full context and audio.
             let startupAudio = MacRealtimeStartupAudio()
+            realtimeTranscript = ""
+            realtimeTranscriptionClient?.close()
+            realtimeTranscriptionClient = startupAudio
             defer { startupAudio.discardPending() }
             audioRecorder.realtimeAudioChunkHandler = { chunk in
                 startupAudio.append(chunk)
@@ -341,7 +345,7 @@ class AppState: ObservableObject {
             }
             await resolveAttemptContext(recordingID: recordingID, attemptID: attemptID)
             guard ownsProcessingAttempt(recordingID: recordingID, attemptID: attemptID),
-                  recordingState == .starting || recordingState == .recording,
+                  recordingState == .starting || recordingState == .recording || recordingState == .finalizing,
                   let resolvedAttemptSnapshot = activeTranscriptionSnapshot
             else { return }
             startRealtimeTranscriptionIfAvailable(
@@ -350,6 +354,9 @@ class AppState: ObservableObject {
                 snapshot: resolvedAttemptSnapshot,
                 startupAudio: startupAudio
             )
+            if !startupAudio.isConnected {
+                audioRecorder.realtimeAudioChunkHandler = nil
+            }
         } catch {
             guard activeRecordingID == recordingID,
                   recordingAttemptID == attemptID,
@@ -2036,7 +2043,9 @@ class AppState: ObservableObject {
     ) async {
         // Short recordings can finish before context. Resolve it before freezing
         // recognition/cleanup inputs, without holding the microphone open.
-        await resolveAttemptContext(recordingID: recordingID, attemptID: captureAttemptID)
+        if let preparation = capturePreparationTask, preparation.attemptID == captureAttemptID {
+            await preparation.task.value
+        }
         guard ownsProcessingAttempt(
             recordingID: recordingID,
             attemptID: captureAttemptID
@@ -2617,15 +2626,6 @@ class AppState: ObservableObject {
         snapshot: MacTranscriptionAttemptSnapshot,
         startupAudio: MacRealtimeStartupAudio
     ) {
-        realtimeTranscript = ""
-        realtimeTranscriptionClient?.close()
-        realtimeTranscriptionClient = nil
-        defer {
-            if realtimeTranscriptionClient == nil {
-                audioRecorder.realtimeAudioChunkHandler = nil
-            }
-        }
-
         let mode = snapshot.mode
         let provider = snapshot.provider
         let transport = snapshot.transport
@@ -2791,12 +2791,10 @@ class AppState: ObservableObject {
             return
         }
 
-        client.start()
-        guard startupAudio.connect(to: { [weak client] chunk in client?.sendAudio(chunk) }) else {
+        guard startupAudio.connect(to: client) else {
             client.close()
             return
         }
-        realtimeTranscriptionClient = client
         DebugLog.info("Started realtime transcription stream for \(provider.displayName)", context: "AppState")
     }
 

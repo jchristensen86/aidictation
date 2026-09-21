@@ -34,6 +34,31 @@ private nonisolated final class LockedEvents: @unchecked Sendable {
     }
 }
 
+private nonisolated final class RecordingRealtimeClient: RealtimeTranscriptionStreaming, @unchecked Sendable {
+    let events: LockedEvents
+    private let queue: DispatchQueue
+    private let gate: RealtimeTranscriptionFinishGate
+
+    init(events: LockedEvents = LockedEvents()) {
+        self.events = events
+        let queue = DispatchQueue(label: "test.startup-client")
+        self.queue = queue
+        gate = RealtimeTranscriptionFinishGate(queue: queue)
+    }
+    func start() {}
+    func sendAudio(_ data: Data) { events.append(String(decoding: data, as: UTF8.self)) }
+    func requestFinish(timeout: TimeInterval) {
+        events.append("finish")
+        queue.async { self.gate.resolve(with: "complete transcript") }
+    }
+    func awaitFinish() async -> String? {
+        await withCheckedContinuation { continuation in
+            queue.async { self.gate.wait(continuation) }
+        }
+    }
+    func close() { queue.async { self.gate.resolve(with: nil) } }
+}
+
 private nonisolated final class HangingFinalizer: @unchecked Sendable, RealtimeTranscriptionFinalizing {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<String?, Never>?
@@ -153,22 +178,22 @@ struct ValidateMacOSRealtimeFinalization {
         startup.append(Data("head".utf8))
         startup.append(Data("middle".utf8))
         precondition(startupEvents.value.isEmpty)
-        precondition(startup.connect { startupEvents.append(String(decoding: $0, as: UTF8.self)) })
+        precondition(startup.connect(to: RecordingRealtimeClient(events: startupEvents)))
         startup.discardPending() // Successful connection must retain live delivery.
         startup.append(Data("tail".utf8))
         precondition(startupEvents.value == ["head", "middle", "tail"])
-        precondition(!startup.connect { _ in preconditionFailure("connected twice") })
+        precondition(!startup.connect(to: RecordingRealtimeClient()))
 
         let overflow = MacRealtimeStartupAudio(maximumBytes: 4)
         overflow.append(Data("head".utf8))
         overflow.append(Data("extra".utf8))
-        precondition(!overflow.connect { _ in preconditionFailure("accepted incomplete audio") })
+        precondition(!overflow.connect(to: RecordingRealtimeClient()))
 
         let cancelledStartup = MacRealtimeStartupAudio()
         cancelledStartup.append(Data("head".utf8))
         cancelledStartup.discardPending()
         cancelledStartup.append(Data("late".utf8))
-        precondition(!cancelledStartup.connect { _ in preconditionFailure("revived cancelled stream") })
+        precondition(!cancelledStartup.connect(to: RecordingRealtimeClient()))
 
         // A chunk reserved before connection may finish converting afterwards.
         // Replay and live delivery must both precede the final drain marker.
@@ -179,9 +204,7 @@ struct ValidateMacOSRealtimeFinalization {
         let headLease = startupDelivery.beginDelivery()!
         let tailLease = startupDelivery.beginDelivery()!
         headLease.deliver(Data("head".utf8))
-        precondition(drainingStartup.connect {
-            drainedEvents.append(String(decoding: $0, as: UTF8.self))
-        })
+        precondition(drainingStartup.connect(to: RecordingRealtimeClient(events: drainedEvents)))
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             startupDelivery.detachAndDrain { complete in
                 precondition(complete)
@@ -191,6 +214,35 @@ struct ValidateMacOSRealtimeFinalization {
             tailLease.deliver(Data("tail".utf8))
         }
         precondition(drainedEvents.value == ["head", "tail", "finish"])
+
+        startup.close()
+        drainingStartup.close()
+
+        // Key-up before context/connection must still finish the complete stream.
+        let shortStartup = MacRealtimeStartupAudio()
+        let shortClient = RecordingRealtimeClient()
+        shortStartup.append(Data("first".utf8))
+        shortStartup.append(Data("last".utf8))
+        let shortFinish = RealtimeTranscriptionFinishRequest(client: shortStartup)
+        shortFinish.requestFinish(timeout: 1)
+        precondition(shortStartup.connect(to: shortClient))
+        let shortResult = await shortFinish.finish()
+        precondition(shortResult == "complete transcript")
+        precondition(shortClient.events.value == ["first", "last", "finish"])
+        shortFinish.close()
+
+        let neverConnected = MacRealtimeStartupAudio()
+        neverConnected.requestFinish(timeout: 0.02)
+        let timedOutResult = await neverConnected.awaitFinish()
+        precondition(timedOutResult == nil)
+        precondition(!neverConnected.connect(to: RecordingRealtimeClient()))
+
+        let cancelledFinish = MacRealtimeStartupAudio()
+        cancelledFinish.requestFinish(timeout: 1)
+        cancelledFinish.close()
+        let cancelledStartupResult = await cancelledFinish.awaitFinish()
+        precondition(cancelledStartupResult == nil)
+        precondition(!cancelledFinish.connect(to: RecordingRealtimeClient()))
 
         var recovery = MacCaptureRecoveryPolicy()
         precondition(recovery.begin(maximumAttempts: 2) == 1)
@@ -536,17 +588,20 @@ struct ValidateMacOSRealtimeFinalization {
             of: "startRealtimeTranscriptionIfAvailable(\n                recordingID: recordingID,"
         )!.lowerBound
         precondition(bufferPosition < recorderStartPosition)
+        precondition(appStateSource[bufferPosition..<recorderStartPosition].contains(
+            "realtimeTranscriptionClient = startupAudio"
+        ))
         precondition(recorderStartPosition < contextWaitPosition)
         precondition(contextWaitPosition < realtimeStartPosition)
         let startupContinuation = appStateSource[contextWaitPosition..<realtimeStartPosition]
         precondition(startupContinuation.contains("ownsProcessingAttempt"))
-        precondition(startupContinuation.contains("recordingState == .starting || recordingState == .recording"))
+        precondition(startupContinuation.contains("recordingState == .starting || recordingState == .recording || recordingState == .finalizing"))
         let recognitionStart = appStateSource.range(of: "private func beginLiveTranscription(")!.lowerBound
         let recognitionOwnerChange = appStateSource.range(
             of: "recordingAttemptID = recognitionAttemptID", range: recognitionStart..<appStateSource.endIndex
         )!.lowerBound
         precondition(appStateSource[recognitionStart..<recognitionOwnerChange].contains(
-            "await resolveAttemptContext(recordingID: recordingID, attemptID: captureAttemptID)"
+            "await preparation.task.value"
         ))
         precondition(
             appStateSource.components(

@@ -4,11 +4,14 @@ on:
   pull_request:
     paths:
       - 'Whishpermate/Whispermate/Services/HotkeyManager.swift'
+      - 'Whishpermate/Whispermate/Services/OverlayWindowManager.swift'
       - 'Whishpermate/Whispermate/Models/HistoryPresentationIdentity.swift'
+      - 'Whishpermate/Whispermate/Models/OverlayState.swift'
       - 'Whishpermate/Whispermate/Views/HistoryMasterDetailView.swift'
       - 'Whishpermate/Whispermate/Views/HotkeyRecorderView.swift'
       - 'scripts/validate_macos_history_row_refresh.swift'
       - 'scripts/validate_macos_hotkey_options.swift'
+      - 'scripts/validate_macos_overlay_resting_state.swift'
       - '.github/workflows/macos-ui-contracts.yml'
 
 permissions:
@@ -29,3 +32,10 @@ jobs:
             scripts/validate_macos_history_row_refresh.swift \
             -o "$RUNNER_TEMP/validate_macos_history_row_refresh"
           "$RUNNER_TEMP/validate_macos_history_row_refresh"
+      - name: Validate overlay resting state
+        run: |
+          swiftc \
+            Whishpermate/Whispermate/Models/OverlayState.swift \
+            scripts/validate_macos_overlay_resting_state.swift \
+            -o "$RUNNER_TEMP/validate_macos_overlay_resting_state"
+          "$RUNNER_TEMP/validate_macos_overlay_resting_state"

@@ -1,6 +1,3 @@
-The free plan is now a clearer one-time trial.
-
-• Try the full product for 5,000 words with no monthly reset.
-• When the trial ends, the app shows the real monthly and annual Pro prices.
-• New lifetime purchases are no longer offered. Existing lifetime access still works exactly as before.
-• Usage labels now distinguish trial words from unlimited paid access.
+• Start Quick Dictation from Shortcuts or Siri, then copy the finished transcript or use it in another shortcut.
+• Open Shortcuts from the new “Set up shortcuts” row in Settings.
+• Long-press a recording in History to copy, share, play, or delete it.

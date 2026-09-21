@@ -5,6 +5,7 @@ import AVFoundation
 import Combine
 import MediaPlayer
 import SwiftUI
+import UIKit
 import WhisperMateShared
 
 @MainActor
@@ -28,6 +29,7 @@ struct ContentView: View {
     @StateObject private var inlineRecording = InlineRecordingCoordinator()
     @State private var showRecordingSheet = false
     @State private var showSettings = false
+    @State private var showShortcutsUnavailable = false
     @State private var recordingSheetID = UUID()
     @State private var selectedRecording: Recording?
     @State private var showTextRules = false
@@ -55,12 +57,16 @@ struct ContentView: View {
     @State private var mobileAudioRecoveryReady = false
     @State private var historyActionMessage: String?
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
         // Use iPhone layout for all devices (scales nicely on iPad)
         iPhoneLayout
             .onAppear {
+                // A Shortcut can launch the app and post its request before this
+                // screen is listening; the request waits in the bridge for us.
+                pickUpQuickDictationRequest()
                 Task { @MainActor in
                     await recoverMobileAudioProcessingIfNeeded()
                     guard mobileAudioRecoveryReady else { return }
@@ -102,6 +108,16 @@ struct ContentView: View {
                 _ = notification
                 consumePendingKeyboardCommandIfNeeded()
             }
+            .modifier(QuickDictationIntentObserver(
+                recorderState: inlineRecording.state,
+                recorderError: inlineRecording.errorMessage,
+                isModelDownloaded: parakeetService.isModelDownloaded,
+                isOfflineModelBusy: offlineModelIsBusy,
+                isRecoveryReady: mobileAudioRecoveryReady,
+                usesOnDeviceTranscription: transcriptionProviderManager.shouldUseOnDeviceTranscription,
+                pickUpRequest: pickUpQuickDictationRequest,
+                retryStart: startPendingQuickDictationIfPossible
+            ))
             .alert("Login Unavailable", isPresented: $showLoginConfigurationAlert) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -118,7 +134,9 @@ struct ContentView: View {
                         switchToCloudTranscription()
                     }
                 }
-                Button("OK", role: .cancel) {}
+                Button("OK", role: .cancel) {
+                    QuickDictationIntentBridge.shared.startDeclined()
+                }
             } message: {
                 Text(offlineModelMessage)
             }
@@ -130,7 +148,9 @@ struct ContentView: View {
                 Button("Use Offline Mode") {
                     useOfflineModeFromCloudConsent()
                 }
-                Button("Not Now", role: .cancel) {}
+                Button("Not Now", role: .cancel) {
+                    QuickDictationIntentBridge.shared.startDeclined()
+                }
             } message: {
                 Text(CloudTranscriptionConsent.disclosureMessage)
             }
@@ -589,6 +609,36 @@ struct ContentView: View {
             .listRowBackground(Color.clear)
             .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
             .animation(.spring(response: 0.34, dampingFraction: 0.72, blendDuration: 0.04), value: isNewRecording)
+            .contextMenu {
+                if !recording.transcription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button {
+                        UIPasteboard.general.string = recording.transcription
+                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+
+                    Button {
+                        recordingToShare = recording
+                    } label: {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                }
+
+                Button {
+                    openSavedRecording(recording)
+                } label: {
+                    Label("Play", systemImage: "play.fill")
+                }
+
+                Divider()
+
+                Button(role: .destructive) {
+                    deleteRecordingSafely(recording)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 Button(role: .destructive) {
                     deleteRecordingSafely(recording)
@@ -747,6 +797,33 @@ struct ContentView: View {
                     }
                 }
 
+                if #available(iOS 16.0, *) {
+                    Section {
+                        Button(action: openShortcuts) {
+                            HStack {
+                                Label {
+                                    Text("Set up shortcuts")
+                                } icon: {
+                                    Image("ShortcutsIcon")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 28, height: 28)
+                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                        .accessibilityHidden(true)
+                                }
+                                Spacer()
+                                Image(systemName: "arrow.up.forward.square")
+                                    .foregroundColor(.secondary)
+                                    .accessibilityHidden(true)
+                            }
+                            .foregroundColor(.primary)
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .accessibilityHint("Opens the Shortcuts app")
+                    }
+                }
+
                 Section("Data") {
                     Button("Clear All History", role: .destructive) {
                         clearHistorySafely()
@@ -771,9 +848,25 @@ struct ContentView: View {
         .sheet(isPresented: $showLoginSheet) {
             AccountLoginView(authManager: authManager)
         }
+        .alert("Shortcuts Unavailable", isPresented: $showShortcutsUnavailable) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Shortcuts couldn't be opened. Make sure Apple's Shortcuts app is installed, then try again.")
+        }
     }
 
     // MARK: - Permission Helpers
+
+    private func openShortcuts() {
+        guard let url = URL(string: "shortcuts://") else { return }
+        openURL(url) { accepted in
+            if accepted {
+                showSettings = false
+            } else {
+                showShortcutsUnavailable = true
+            }
+        }
+    }
 
     private func checkMicrophonePermission() -> PermissionStatus {
         switch AVAudioSession.sharedInstance().recordPermission {
@@ -1100,6 +1193,41 @@ struct ContentView: View {
         }
     }
 
+    /// Takes a Quick Dictation request from Shortcuts once this screen is
+    /// listening, whether it arrived now or while the app was launching.
+    private func pickUpQuickDictationRequest() {
+        guard QuickDictationIntentBridge.shared.takeStartRequest() else { return }
+        guard inlineRecording.state == .idle else {
+            QuickDictationIntentBridge.shared.fail(.busy)
+            return
+        }
+        let requestID = QuickDictationIntentBridge.shared.requestID
+        QuickDictationIntentBridge.shared.setCancellationHandler {
+            showCloudTranscriptionConsent = false
+            showOfflineModelAlert = false
+            inlineRecording.cancelQuickDictation(requestID: requestID)
+        }
+        // Clear an earlier error so a new one from this attempt is noticed.
+        inlineRecording.errorMessage = nil
+        startPendingQuickDictationIfPossible()
+    }
+
+    /// Starts recording for a pending Quick Dictation request. The saved
+    /// recordings check and an offline model download finish on their own and
+    /// trigger another attempt, so they are waited out instead of shown as
+    /// prompts. Other prompts are shown as usual; allowing one starts recording
+    /// and declining one ends the request.
+    private func startPendingQuickDictationIfPossible() {
+        guard QuickDictationIntentBridge.shared.isStartPending,
+              inlineRecording.state == .idle,
+              mobileAudioRecoveryReady
+        else { return }
+        if selectedModeNeedsOfflineRuntime, offlineModelIsBusy, !parakeetService.isModelDownloaded {
+            return
+        }
+        handleInlineRecordingTap()
+    }
+
     private func handleInlineRecordingTap() {
         DebugLog.info("inline primary action state=\(inlineRecording.state) selectedMode=\(selectedRecordingMode.displayName)", context: "KEYBOARD_DIAG")
         if inlineRecording.state == .idle {
@@ -1115,6 +1243,8 @@ struct ContentView: View {
             shortcutManager: shortcutManager,
             selectedPreset: recordingPreset(for: selectedRecordingMode, manager: toneStyleManager),
             keyboardIdentity: activeKeyboardDictationIdentity,
+            quickDictationRequestID: QuickDictationIntentBridge.shared.isStartPending && activeKeyboardDictationIdentity == nil
+                ? QuickDictationIntentBridge.shared.requestID : nil,
             keepAudioBridgeAliveAfterStop: activeKeyboardDictationIdentity != nil
         ) { recording in
                 if let activeKeyboardDictationIdentity {
@@ -1125,6 +1255,10 @@ struct ContentView: View {
                 self.inlineRecording.setKeyboardAttemptIdentity(nil)
                 self.inlineRecording.stopListening()
                 self.rearmQuickDictationAfterKeyboardSession()
+            }
+            if QuickDictationIntentBridge.shared.finish(with: recording.transcription) {
+                UIPasteboard.general.string = recording.transcription
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
             }
             markRecordingAsNew(recording)
         }
@@ -1714,6 +1848,38 @@ struct ContentView: View {
 private struct ReferralShareItem: Identifiable {
     let id = UUID()
     let text: String
+}
+
+/// Passes recorder and setup changes to a pending Quick Dictation request, and
+/// retries its start when something that was holding it back finishes.
+private struct QuickDictationIntentObserver: ViewModifier {
+    let recorderState: InlineRecordingState
+    let recorderError: String?
+    let isModelDownloaded: Bool
+    let isOfflineModelBusy: Bool
+    let isRecoveryReady: Bool
+    let usesOnDeviceTranscription: Bool
+    let pickUpRequest: @MainActor () -> Void
+    let retryStart: @MainActor () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: QuickDictationIntentBridge.startNotification)) { _ in
+                pickUpRequest()
+            }
+            .onChange(of: recorderState) { state in
+                QuickDictationIntentBridge.shared.recorderStateChanged(isIdle: state == .idle)
+            }
+            .onChange(of: recorderError) { message in
+                if let message {
+                    QuickDictationIntentBridge.shared.recorderReportedError(message)
+                }
+            }
+            .onChange(of: isModelDownloaded) { _ in retryStart() }
+            .onChange(of: isOfflineModelBusy) { _ in retryStart() }
+            .onChange(of: isRecoveryReady) { _ in retryStart() }
+            .onChange(of: usesOnDeviceTranscription) { _ in retryStart() }
+    }
 }
 
 private struct KeyboardDictationReturnView: View {
@@ -2495,6 +2661,8 @@ private final class InlineRecordingCoordinator: ObservableObject {
     private var activeTranscriptionOptions: TranscriptionOptions?
     private var keyboardAttemptIdentity: KeyboardDictationHandoff.AttemptIdentity?
     private var stopRequestedWhilePreparing = false
+    private var quickDictationRequestID: Int?
+    private var pendingPermissionRequestID: UUID?
     private var pendingAttemptID: UUID?
     private weak var pendingAttemptRecorder: AudioRecorder?
     private var cancelledPendingAttemptID: UUID?
@@ -2589,11 +2757,13 @@ private final class InlineRecordingCoordinator: ObservableObject {
         shortcutManager: ShortcutManager,
         selectedPreset: ContextRule?,
         keyboardIdentity: KeyboardDictationHandoff.AttemptIdentity? = nil,
+        quickDictationRequestID: Int? = nil,
         keepAudioBridgeAliveAfterStop: Bool = false,
         onCompleted: @escaping (Recording) -> Void
     ) {
         switch state {
         case .idle:
+            self.quickDictationRequestID = quickDictationRequestID
             startRecording(
                 historyManager: historyManager,
                 dictionaryManager: dictionaryManager,
@@ -2719,7 +2889,14 @@ private final class InlineRecordingCoordinator: ObservableObject {
         }
     }
 
+    func cancelQuickDictation(requestID: Int) {
+        guard quickDictationRequestID == requestID else { return }
+        stopListening()
+    }
+
     func stopListening() {
+        quickDictationRequestID = nil
+        pendingPermissionRequestID = nil
         realtimeTranscription.cancel(recorder: audioRecorder)
         activeAttemptTask?.cancel()
         captureDeadlineTask?.cancel()
@@ -2984,8 +3161,12 @@ private final class InlineRecordingCoordinator: ObservableObject {
             showError(message)
         case .undetermined:
             DebugLog.info("requesting microphone permission", context: "KEYBOARD_DIAG")
+            let permissionRequestID = UUID()
+            pendingPermissionRequestID = permissionRequestID
             AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
                 DispatchQueue.main.async {
+                    guard self?.pendingPermissionRequestID == permissionRequestID else { return }
+                    self?.pendingPermissionRequestID = nil
                     DebugLog.info("microphone permission response granted=\(granted)", context: "KEYBOARD_DIAG")
                     if granted {
                         self?.beginRecording(
@@ -3803,6 +3984,8 @@ private final class InlineRecordingCoordinator: ObservableObject {
     }
 
     private func reset(keepAudioBridgeAlive: Bool = false) {
+        quickDictationRequestID = nil
+        pendingPermissionRequestID = nil
         captureDeadlineTask?.cancel()
         captureDeadlineTask = nil
         if keepAudioBridgeAlive {

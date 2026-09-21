@@ -12,6 +12,13 @@ python3 scripts/validate_transcription_prompt_routing.py
 
 swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors \
   -module-cache-path "$module_cache" \
+  Whishpermate/WhisperMateIOS/QuickDictationIntentBridge.swift \
+  scripts/validate_ios_quick_dictation.swift \
+  -o "$work_dir/validate-ios-quick-dictation"
+"$work_dir/validate-ios-quick-dictation"
+
+swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors \
+  -module-cache-path "$module_cache" \
   Whishpermate/WhisperMateShared/Networking/TranscriptionCleanupPrompt.swift \
   scripts/validate_transcription_cleanup_prompt.swift \
   -o "$work_dir/validate-transcription-cleanup-prompt"

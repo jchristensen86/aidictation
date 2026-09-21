@@ -1,3 +1,2 @@
 • Start Quick Dictation from Shortcuts or Siri, then copy the finished transcript or use it in another shortcut.
 • Open Shortcuts from the new “Set up shortcuts” row in Settings.
-• Swipe right on a transcript in History to copy it.

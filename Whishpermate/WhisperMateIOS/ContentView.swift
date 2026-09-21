@@ -29,6 +29,7 @@ struct ContentView: View {
     @StateObject private var inlineRecording = InlineRecordingCoordinator()
     @State private var showRecordingSheet = false
     @State private var showSettings = false
+    @State private var showShortcutsUnavailable = false
     @State private var recordingSheetID = UUID()
     @State private var selectedRecording: Recording?
     @State private var showTextRules = false
@@ -56,6 +57,7 @@ struct ContentView: View {
     @State private var mobileAudioRecoveryReady = false
     @State private var historyActionMessage: String?
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.openURL) private var openURL
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
@@ -765,6 +767,33 @@ struct ContentView: View {
                     }
                 }
 
+                if #available(iOS 16.0, *) {
+                    Section {
+                        Button(action: openShortcuts) {
+                            HStack {
+                                Label {
+                                    Text("Set up shortcuts")
+                                } icon: {
+                                    Image("ShortcutsIcon")
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 28, height: 28)
+                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                        .accessibilityHidden(true)
+                                }
+                                Spacer()
+                                Image(systemName: "arrow.up.forward.square")
+                                    .foregroundColor(.secondary)
+                                    .accessibilityHidden(true)
+                            }
+                            .foregroundColor(.primary)
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .accessibilityHint("Opens the Shortcuts app")
+                    }
+                }
+
                 Section("Data") {
                     Button("Clear All History", role: .destructive) {
                         clearHistorySafely()
@@ -789,9 +818,25 @@ struct ContentView: View {
         .sheet(isPresented: $showLoginSheet) {
             AccountLoginView(authManager: authManager)
         }
+        .alert("Shortcuts Unavailable", isPresented: $showShortcutsUnavailable) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Shortcuts couldn't be opened. Make sure Apple's Shortcuts app is installed, then try again.")
+        }
     }
 
     // MARK: - Permission Helpers
+
+    private func openShortcuts() {
+        guard let url = URL(string: "shortcuts://") else { return }
+        openURL(url) { accepted in
+            if accepted {
+                showSettings = false
+            } else {
+                showShortcutsUnavailable = true
+            }
+        }
+    }
 
     private func checkMicrophonePermission() -> PermissionStatus {
         switch AVAudioSession.sharedInstance().recordPermission {

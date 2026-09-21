@@ -609,6 +609,36 @@ struct ContentView: View {
             .listRowBackground(Color.clear)
             .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
             .animation(.spring(response: 0.34, dampingFraction: 0.72, blendDuration: 0.04), value: isNewRecording)
+            .contextMenu {
+                if !recording.transcription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button {
+                        UIPasteboard.general.string = recording.transcription
+                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+
+                    Button {
+                        recordingToShare = recording
+                    } label: {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                }
+
+                Button {
+                    openSavedRecording(recording)
+                } label: {
+                    Label("Play", systemImage: "play.fill")
+                }
+
+                Divider()
+
+                Button(role: .destructive) {
+                    deleteRecordingSafely(recording)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 Button(role: .destructive) {
                     deleteRecordingSafely(recording)

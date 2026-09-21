@@ -1,2 +1,3 @@
 • Start Quick Dictation from Shortcuts or Siri, then copy the finished transcript or use it in another shortcut.
 • Open Shortcuts from the new “Set up shortcuts” row in Settings.
+• Long-press a recording in History to copy, share, play, or delete it.

@@ -148,6 +148,50 @@ private func waitForSignal(
 @main
 struct ValidateMacOSRealtimeFinalization {
     static func main() async throws {
+        let startup = MacRealtimeStartupAudio(maximumBytes: 16)
+        let startupEvents = LockedEvents()
+        startup.append(Data("head".utf8))
+        startup.append(Data("middle".utf8))
+        precondition(startupEvents.value.isEmpty)
+        precondition(startup.connect { startupEvents.append(String(decoding: $0, as: UTF8.self)) })
+        startup.discardPending() // Successful connection must retain live delivery.
+        startup.append(Data("tail".utf8))
+        precondition(startupEvents.value == ["head", "middle", "tail"])
+        precondition(!startup.connect { _ in preconditionFailure("connected twice") })
+
+        let overflow = MacRealtimeStartupAudio(maximumBytes: 4)
+        overflow.append(Data("head".utf8))
+        overflow.append(Data("extra".utf8))
+        precondition(!overflow.connect { _ in preconditionFailure("accepted incomplete audio") })
+
+        let cancelledStartup = MacRealtimeStartupAudio()
+        cancelledStartup.append(Data("head".utf8))
+        cancelledStartup.discardPending()
+        cancelledStartup.append(Data("late".utf8))
+        precondition(!cancelledStartup.connect { _ in preconditionFailure("revived cancelled stream") })
+
+        // A chunk reserved before connection may finish converting afterwards.
+        // Replay and live delivery must both precede the final drain marker.
+        let startupDelivery = RealtimeAudioDeliveryQueue()
+        let drainingStartup = MacRealtimeStartupAudio()
+        let drainedEvents = LockedEvents()
+        startupDelivery.handler = { drainingStartup.append($0) }
+        let headLease = startupDelivery.beginDelivery()!
+        let tailLease = startupDelivery.beginDelivery()!
+        headLease.deliver(Data("head".utf8))
+        precondition(drainingStartup.connect {
+            drainedEvents.append(String(decoding: $0, as: UTF8.self))
+        })
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            startupDelivery.detachAndDrain { complete in
+                precondition(complete)
+                drainedEvents.append("finish")
+                continuation.resume()
+            }
+            tailLease.deliver(Data("tail".utf8))
+        }
+        precondition(drainedEvents.value == ["head", "tail", "finish"])
+
         var recovery = MacCaptureRecoveryPolicy()
         precondition(recovery.begin(maximumAttempts: 2) == 1)
         precondition(recovery.begin(maximumAttempts: 2) == nil)
@@ -481,17 +525,29 @@ struct ValidateMacOSRealtimeFinalization {
         precondition(takeStart != nil && stopHelperStart != nil)
         let takeHelper = String(appStateSource[takeStart! ..< stopHelperStart!])
         precondition(!takeHelper.contains("detachRealtimeAudioChunkHandlerAndDrain"))
-        let realtimeStartPosition = appStateSource.range(
-            of: "startRealtimeTranscriptionIfAvailable(\n                recordingID: recordingID,"
-        )?.lowerBound
+        let bufferPosition = appStateSource.range(of: "let startupAudio = MacRealtimeStartupAudio()")!.lowerBound
         let recorderStartPosition = appStateSource.range(
             of: "audioRecorder.startRecording(\n                recordingID: attemptID,"
-        )?.lowerBound
-        precondition(
-            realtimeStartPosition != nil
-                && recorderStartPosition != nil
-                && realtimeStartPosition! < recorderStartPosition!
-        )
+        )!.lowerBound
+        let contextWaitPosition = appStateSource.range(
+            of: "await resolveAttemptContext(recordingID: recordingID, attemptID: attemptID)"
+        )!.lowerBound
+        let realtimeStartPosition = appStateSource.range(
+            of: "startRealtimeTranscriptionIfAvailable(\n                recordingID: recordingID,"
+        )!.lowerBound
+        precondition(bufferPosition < recorderStartPosition)
+        precondition(recorderStartPosition < contextWaitPosition)
+        precondition(contextWaitPosition < realtimeStartPosition)
+        let startupContinuation = appStateSource[contextWaitPosition..<realtimeStartPosition]
+        precondition(startupContinuation.contains("ownsProcessingAttempt"))
+        precondition(startupContinuation.contains("recordingState == .starting || recordingState == .recording"))
+        let recognitionStart = appStateSource.range(of: "private func beginLiveTranscription(")!.lowerBound
+        let recognitionOwnerChange = appStateSource.range(
+            of: "recordingAttemptID = recognitionAttemptID", range: recognitionStart..<appStateSource.endIndex
+        )!.lowerBound
+        precondition(appStateSource[recognitionStart..<recognitionOwnerChange].contains(
+            "await resolveAttemptContext(recordingID: recordingID, attemptID: captureAttemptID)"
+        ))
         precondition(
             appStateSource.components(
                 separatedBy: "startRealtimeTranscriptionIfAvailable("

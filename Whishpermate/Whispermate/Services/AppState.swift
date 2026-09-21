@@ -64,6 +64,7 @@ class AppState: ObservableObject {
     private var recordingAttemptID: UUID?
     private var activeCaptureLease: MacAudioProcessingStore.Lease?
     private var activeTranscriptionSnapshot: MacTranscriptionAttemptSnapshot?
+    private var attemptContextCapture: (attemptID: UUID, task: Task<MacCapturedAttemptContext?, Never>)?
     private var captureDeadlineTask: Task<Void, Never>?
     private var retranscriptionAttemptIDs: [UUID: UUID] = [:]
     private var transcriptionTasks: [UUID: Task<Void, Never>] = [:]
@@ -152,7 +153,7 @@ class AppState: ObservableObject {
         capturedScreenContext = nil
         let recordingID = UUID()
         let attemptID = UUID()
-        let attemptContextTask = beginAttemptContextCapture()
+        attemptContextCapture = (attemptID, beginAttemptContextCapture())
         let attemptSnapshot = makeTranscriptionAttemptSnapshot(
             outputMode: .dictation,
             transcriptionOptions: .default,
@@ -233,7 +234,6 @@ class AppState: ObservableObject {
                 recordingID: recordingID,
                 attemptID: attemptID,
                 attemptSnapshot: attemptSnapshot,
-                attemptContextTask: attemptContextTask,
                 shouldShowOverlayControls: shouldShowOverlayControls
             )
         }
@@ -265,7 +265,6 @@ class AppState: ObservableObject {
         recordingID: UUID,
         attemptID: UUID,
         attemptSnapshot: MacTranscriptionAttemptSnapshot,
-        attemptContextTask: Task<MacCapturedAttemptContext?, Never>,
         shouldShowOverlayControls: Bool
     ) async {
         defer { pendingPreparationStoreIDs.removeValue(forKey: recordingID) }
@@ -299,35 +298,12 @@ class AppState: ObservableObject {
                 }
                 return
             }
-            let attemptContext = await attemptContextTask.value
-            guard activeRecordingID == recordingID,
-                  recordingAttemptID == attemptID,
-                  recordingState == .starting,
-                  processingAttemptFence.allows(attemptID),
-                  !terminationBarrierActive else { return }
-            capturedAppContext = attemptContext?.description
-            capturedAppBundleId = attemptContext?.bundleID
-            capturedWindowTitle = attemptContext?.windowTitle
-            if let attemptContext {
-                DebugLog.info(
-                    "Captured app context: \(attemptContext.description)",
-                    context: "AppState"
-                )
-            }
-            let resolvedAttemptSnapshot = attemptSnapshot.withContext(
-                appContext: attemptContext?.description,
-                screenContext: capturedScreenContext,
-                appBundleID: attemptContext?.bundleID,
-                windowTitle: attemptContext?.windowTitle
-            )
-            activeTranscriptionSnapshot = resolvedAttemptSnapshot
-
             let provisional = Recording(
                 id: recordingID,
                 audioFileURL: store.partialURL(for: recordingID),
                 status: .processing,
-                outputMode: resolvedAttemptSnapshot.outputMode,
-                transcriptionOptions: resolvedAttemptSnapshot.transcriptionOptions,
+                outputMode: attemptSnapshot.outputMode,
+                transcriptionOptions: attemptSnapshot.transcriptionOptions,
                 sourceIntegrity: .unfinalized
             )
             guard historyManager.upsertRecording(provisional) else {
@@ -342,14 +318,13 @@ class AppState: ObservableObject {
 
             activeCaptureLease = prepared.lease
             overlayManager.initializeAudioObservers()
-            // Install realtime delivery before native capture starts. The
-            // preparation buffer that proves the recorder is ready must be in
-            // both the durable source and the realtime stream.
-            startRealtimeTranscriptionIfAvailable(
-                recordingID: recordingID,
-                attemptID: attemptID,
-                snapshot: resolvedAttemptSnapshot
-            )
+            // Retain the head of this recording while context resolves. Capture
+            // starts now; the stream still receives its full context and audio.
+            let startupAudio = MacRealtimeStartupAudio()
+            defer { startupAudio.discardPending() }
+            audioRecorder.realtimeAudioChunkHandler = { chunk in
+                startupAudio.append(chunk)
+            }
             audioRecorder.startRecording(
                 recordingID: attemptID,
                 recordingURL: store.partialURL(for: recordingID)
@@ -364,6 +339,17 @@ class AppState: ObservableObject {
                     )
                 }
             }
+            await resolveAttemptContext(recordingID: recordingID, attemptID: attemptID)
+            guard ownsProcessingAttempt(recordingID: recordingID, attemptID: attemptID),
+                  recordingState == .starting || recordingState == .recording,
+                  let resolvedAttemptSnapshot = activeTranscriptionSnapshot
+            else { return }
+            startRealtimeTranscriptionIfAvailable(
+                recordingID: recordingID,
+                attemptID: attemptID,
+                snapshot: resolvedAttemptSnapshot,
+                startupAudio: startupAudio
+            )
         } catch {
             guard activeRecordingID == recordingID,
                   recordingAttemptID == attemptID,
@@ -376,6 +362,23 @@ class AppState: ObservableObject {
                 removeMetadata: true
             )
         }
+    }
+
+    private func resolveAttemptContext(recordingID: UUID, attemptID: UUID) async {
+        guard let capture = attemptContextCapture, capture.attemptID == attemptID else { return }
+        let context = await capture.task.value
+        guard ownsProcessingAttempt(recordingID: recordingID, attemptID: attemptID),
+              let snapshot = activeTranscriptionSnapshot else { return }
+        capturedAppContext = context?.description
+        capturedAppBundleId = context?.bundleID
+        capturedWindowTitle = context?.windowTitle
+        activeTranscriptionSnapshot = snapshot.withContext(
+            appContext: context?.description,
+            screenContext: capturedScreenContext,
+            appBundleID: context?.bundleID,
+            windowTitle: context?.windowTitle
+        )
+        attemptContextCapture = nil
     }
 
     private func ownsProcessingAttempt(recordingID: UUID, attemptID: UUID) -> Bool {
@@ -434,7 +437,7 @@ class AppState: ObservableObject {
                 NotificationCenter.default.post(name: .recordingStarted, object: nil)
 
                 DebugLog.info("✅ Recording started successfully", context: "AppState")
-                DictationStopwatch.mark("capture pipeline ready (store lease + context)")
+                DictationStopwatch.mark("capture pipeline ready (store lease)")
                 // The bubble was already shown at key-press. Only transition here
                 // if that early call was skipped, so a late overlay-mode switch
                 // still lands in the right state.
@@ -2031,6 +2034,9 @@ class AppState: ObservableObject {
         captureAttemptID: UUID,
         realtimeFinishRequest: RealtimeTranscriptionFinishRequest?
     ) async {
+        // Short recordings can finish before context. Resolve it before freezing
+        // recognition/cleanup inputs, without holding the microphone open.
+        await resolveAttemptContext(recordingID: recordingID, attemptID: captureAttemptID)
         guard ownsProcessingAttempt(
             recordingID: recordingID,
             attemptID: captureAttemptID
@@ -2608,12 +2614,17 @@ class AppState: ObservableObject {
     private func startRealtimeTranscriptionIfAvailable(
         recordingID: UUID,
         attemptID: UUID,
-        snapshot: MacTranscriptionAttemptSnapshot
+        snapshot: MacTranscriptionAttemptSnapshot,
+        startupAudio: MacRealtimeStartupAudio
     ) {
         realtimeTranscript = ""
         realtimeTranscriptionClient?.close()
         realtimeTranscriptionClient = nil
-        audioRecorder.realtimeAudioChunkHandler = nil
+        defer {
+            if realtimeTranscriptionClient == nil {
+                audioRecorder.realtimeAudioChunkHandler = nil
+            }
+        }
 
         let mode = snapshot.mode
         let provider = snapshot.provider
@@ -2780,11 +2791,12 @@ class AppState: ObservableObject {
             return
         }
 
-        realtimeTranscriptionClient = client
         client.start()
-        audioRecorder.realtimeAudioChunkHandler = { [weak client] chunk in
-            client?.sendAudio(chunk)
+        guard startupAudio.connect(to: { [weak client] chunk in client?.sendAudio(chunk) }) else {
+            client.close()
+            return
         }
+        realtimeTranscriptionClient = client
         DebugLog.info("Started realtime transcription stream for \(provider.displayName)", context: "AppState")
     }
 

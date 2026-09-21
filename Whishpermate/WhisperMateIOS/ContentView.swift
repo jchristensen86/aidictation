@@ -579,42 +579,48 @@ struct ContentView: View {
         ForEach(displayedHistoryRecordings) { recording in
             let isNewRecording = newlyInsertedRecordingID == recording.id
 
-            HStack(alignment: .top, spacing: 0) {
-                Button(action: {
-                    openSavedRecording(recording)
-                }) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if recording.outputMode == .notes {
-                            Label("Notes", systemImage: "note.text")
-                                .font(.caption.weight(.medium))
-                                .foregroundColor(.secondary)
-                        }
-                        Text(historyDisplayText(for: recording))
-                            .font(.body)
-                            .foregroundColor(.primary)
-                        Text(recording.formattedDate)
-                            .font(.caption)
+            Button(action: {
+                openSavedRecording(recording)
+            }) {
+                VStack(alignment: .leading, spacing: 8) {
+                    if recording.outputMode == .notes {
+                        Label("Notes", systemImage: "note.text")
+                            .font(.caption.weight(.medium))
                             .foregroundColor(.secondary)
                     }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+                    Text(historyDisplayText(for: recording))
+                        .font(.body)
+                        .foregroundColor(.primary)
+                    Text(recording.formattedDate)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-                .buttonStyle(PlainButtonStyle())
-
-                if !recording.transcription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    HistoryCopyButton(text: recording.transcription)
-                }
+                .padding(.vertical, 8)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.dsPrimary.opacity(isNewRecording ? 0.14 : 0))
+                )
+                .scaleEffect(isNewRecording ? 1.025 : 1, anchor: .center)
+                .contentShape(Rectangle())
             }
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.dsPrimary.opacity(isNewRecording ? 0.14 : 0))
-            )
-            .scaleEffect(isNewRecording ? 1.025 : 1, anchor: .center)
+            .buttonStyle(PlainButtonStyle())
             .listRowBackground(Color.clear)
             .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
             .animation(.spring(response: 0.34, dampingFraction: 0.72, blendDuration: 0.04), value: isNewRecording)
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                if !recording.transcription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button {
+                        UIPasteboard.general.string = recording.transcription
+                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                        UIAccessibility.post(notification: .announcement, argument: "Copied")
+                    } label: {
+                        Label("Copy", systemImage: "doc.on.doc")
+                    }
+                    .tint(Color.dsPrimary)
+                }
+            }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 Button(role: .destructive) {
                     deleteRecordingSafely(recording)
@@ -1855,37 +1861,6 @@ private struct QuickDictationIntentObserver: ViewModifier {
             .onChange(of: isOfflineModelBusy) { _ in retryStart() }
             .onChange(of: isRecoveryReady) { _ in retryStart() }
             .onChange(of: usesOnDeviceTranscription) { _ in retryStart() }
-    }
-}
-
-/// Copies a dictation from its History row in one tap. The icon turns into a
-/// checkmark for a moment to confirm, so no alert has to be dismissed.
-private struct HistoryCopyButton: View {
-    let text: String
-    @State private var didCopy = false
-    @State private var resetTask: Task<Void, Never>?
-
-    var body: some View {
-        Button {
-            UIPasteboard.general.string = text
-            didCopy = true
-            resetTask?.cancel()
-            resetTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-                if !Task.isCancelled {
-                    didCopy = false
-                }
-            }
-        } label: {
-            Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundColor(Color.dsPrimary)
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(didCopy ? "Copied" : "Copy")
-        .onDisappear { resetTask?.cancel() }
     }
 }
 

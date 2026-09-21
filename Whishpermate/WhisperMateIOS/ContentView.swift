@@ -559,33 +559,39 @@ struct ContentView: View {
         ForEach(displayedHistoryRecordings) { recording in
             let isNewRecording = newlyInsertedRecordingID == recording.id
 
-            Button(action: {
-                openSavedRecording(recording)
-            }) {
-                VStack(alignment: .leading, spacing: 8) {
-                    if recording.outputMode == .notes {
-                        Label("Notes", systemImage: "note.text")
-                            .font(.caption.weight(.medium))
+            HStack(alignment: .top, spacing: 0) {
+                Button(action: {
+                    openSavedRecording(recording)
+                }) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if recording.outputMode == .notes {
+                            Label("Notes", systemImage: "note.text")
+                                .font(.caption.weight(.medium))
+                                .foregroundColor(.secondary)
+                        }
+                        Text(historyDisplayText(for: recording))
+                            .font(.body)
+                            .foregroundColor(.primary)
+                        Text(recording.formattedDate)
+                            .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    Text(historyDisplayText(for: recording))
-                        .font(.body)
-                        .foregroundColor(.primary)
-                    Text(recording.formattedDate)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color.dsPrimary.opacity(isNewRecording ? 0.14 : 0))
-                )
-                .scaleEffect(isNewRecording ? 1.025 : 1, anchor: .center)
-                .contentShape(Rectangle())
+                .buttonStyle(PlainButtonStyle())
+
+                if !recording.transcription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    HistoryCopyButton(text: recording.transcription)
+                }
             }
-            .buttonStyle(PlainButtonStyle())
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.dsPrimary.opacity(isNewRecording ? 0.14 : 0))
+            )
+            .scaleEffect(isNewRecording ? 1.025 : 1, anchor: .center)
             .listRowBackground(Color.clear)
             .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
             .animation(.spring(response: 0.34, dampingFraction: 0.72, blendDuration: 0.04), value: isNewRecording)
@@ -1714,6 +1720,37 @@ struct ContentView: View {
 private struct ReferralShareItem: Identifiable {
     let id = UUID()
     let text: String
+}
+
+/// Copies a dictation from its History row in one tap. The icon turns into a
+/// checkmark for a moment to confirm, so no alert has to be dismissed.
+private struct HistoryCopyButton: View {
+    let text: String
+    @State private var didCopy = false
+    @State private var resetTask: Task<Void, Never>?
+
+    var body: some View {
+        Button {
+            UIPasteboard.general.string = text
+            didCopy = true
+            resetTask?.cancel()
+            resetTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if !Task.isCancelled {
+                    didCopy = false
+                }
+            }
+        } label: {
+            Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundColor(Color.dsPrimary)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(didCopy ? "Copied" : "Copy")
+        .onDisappear { resetTask?.cancel() }
+    }
 }
 
 private struct KeyboardDictationReturnView: View {

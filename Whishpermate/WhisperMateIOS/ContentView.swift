@@ -609,18 +609,7 @@ struct ContentView: View {
             .listRowBackground(Color.clear)
             .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
             .animation(.spring(response: 0.34, dampingFraction: 0.72, blendDuration: 0.04), value: isNewRecording)
-            .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                if !recording.transcription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Button {
-                        UIPasteboard.general.string = recording.transcription
-                        UINotificationFeedbackGenerator().notificationOccurred(.success)
-                        UIAccessibility.post(notification: .announcement, argument: "Copied")
-                    } label: {
-                        Label("Copy", systemImage: "doc.on.doc")
-                    }
-                    .tint(Color.dsPrimary)
-                }
-            }
+            .modifier(HistorySwipeToCopy(text: recording.transcription))
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 Button(role: .destructive) {
                     deleteRecordingSafely(recording)
@@ -1861,6 +1850,79 @@ private struct QuickDictationIntentObserver: ViewModifier {
             .onChange(of: isOfflineModelBusy) { _ in retryStart() }
             .onChange(of: isRecoveryReady) { _ in retryStart() }
             .onChange(of: usesOnDeviceTranscription) { _ in retryStart() }
+    }
+}
+
+private struct HistorySwipeToCopy: ViewModifier {
+    let text: String
+    @GestureState(resetTransaction: Transaction(animation: .spring(response: 0.25, dampingFraction: 0.85)))
+    private var dragOffset: CGFloat = 0
+    @State private var copyFeedbackID: UUID?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            content
+        } else {
+            content
+                .offset(x: dragOffset)
+                .background(alignment: .leading) {
+                    if dragOffset > 0 {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundColor(.blue)
+                            .frame(width: 40, height: 40)
+                            .background(Circle().fill(Color.blue.opacity(0.12)))
+                            .opacity(min(dragOffset / 48, 1))
+                            .padding(.leading, 8)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .clipped()
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 20)
+                        .updating($dragOffset) { value, offset, _ in
+                            let distance = value.translation
+                            guard distance.width > abs(distance.height) * 1.5 else { return }
+                            offset = min(distance.width, 88)
+                        }
+                        .onEnded { value in
+                            let distance = value.translation
+                            guard distance.width >= 56,
+                                  distance.width > abs(distance.height) * 1.5
+                            else { return }
+                            copyTranscript()
+                        }
+                )
+                .overlay(alignment: .trailing) {
+                    if copyFeedbackID != nil {
+                        Label("Copied", systemImage: "checkmark")
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(Color(uiColor: .secondarySystemGroupedBackground)))
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .accessibilityAction(named: "Copy") {
+                    copyTranscript()
+                }
+                .task(id: copyFeedbackID) {
+                    guard copyFeedbackID != nil else { return }
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    copyFeedbackID = nil
+                }
+        }
+    }
+
+    private func copyTranscript() {
+        UIPasteboard.general.string = text
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        UIAccessibility.post(notification: .announcement, argument: "Copied")
+        copyFeedbackID = UUID()
     }
 }
 

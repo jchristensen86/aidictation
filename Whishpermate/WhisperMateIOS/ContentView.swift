@@ -62,6 +62,9 @@ struct ContentView: View {
         // Use iPhone layout for all devices (scales nicely on iPad)
         iPhoneLayout
             .onAppear {
+                // A Shortcut can launch the app and post its request before this
+                // screen is listening; the request waits in the bridge for us.
+                pickUpQuickDictationRequest()
                 Task { @MainActor in
                     await recoverMobileAudioProcessingIfNeeded()
                     guard mobileAudioRecoveryReady else { return }
@@ -103,9 +106,16 @@ struct ContentView: View {
                 _ = notification
                 consumePendingKeyboardCommandIfNeeded()
             }
-            .onReceive(NotificationCenter.default.publisher(for: QuickDictationIntentBridge.startNotification)) { _ in
-                startQuickDictationIntent()
-            }
+            .modifier(QuickDictationIntentObserver(
+                recorderState: inlineRecording.state,
+                recorderError: inlineRecording.errorMessage,
+                isModelDownloaded: parakeetService.isModelDownloaded,
+                isOfflineModelBusy: offlineModelIsBusy,
+                isRecoveryReady: mobileAudioRecoveryReady,
+                usesOnDeviceTranscription: transcriptionProviderManager.shouldUseOnDeviceTranscription,
+                pickUpRequest: pickUpQuickDictationRequest,
+                retryStart: startPendingQuickDictationIfPossible
+            ))
             .alert("Login Unavailable", isPresented: $showLoginConfigurationAlert) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -122,7 +132,9 @@ struct ContentView: View {
                         switchToCloudTranscription()
                     }
                 }
-                Button("OK", role: .cancel) {}
+                Button("OK", role: .cancel) {
+                    QuickDictationIntentBridge.shared.startDeclined()
+                }
             } message: {
                 Text(offlineModelMessage)
             }
@@ -134,7 +146,9 @@ struct ContentView: View {
                 Button("Use Offline Mode") {
                     useOfflineModeFromCloudConsent()
                 }
-                Button("Not Now", role: .cancel) {}
+                Button("Not Now", role: .cancel) {
+                    QuickDictationIntentBridge.shared.startDeclined()
+                }
             } message: {
                 Text(CloudTranscriptionConsent.disclosureMessage)
             }
@@ -1104,17 +1118,33 @@ struct ContentView: View {
         }
     }
 
-    private func startQuickDictationIntent() {
+    /// Takes a Quick Dictation request from Shortcuts once this screen is
+    /// listening, whether it arrived now or while the app was launching.
+    private func pickUpQuickDictationRequest() {
+        guard QuickDictationIntentBridge.shared.takeStartRequest() else { return }
         guard inlineRecording.state == .idle else {
-            QuickDictationIntentBridge.shared.fail(QuickDictationIntentError.couldNotStart)
+            QuickDictationIntentBridge.shared.fail(.busy)
             return
         }
+        // Clear an earlier error so a new one from this attempt is noticed.
+        inlineRecording.errorMessage = nil
+        startPendingQuickDictationIfPossible()
+    }
 
-        handleInlineRecordingTap()
-        guard inlineRecording.state != .idle else {
-            QuickDictationIntentBridge.shared.fail(QuickDictationIntentError.couldNotStart)
+    /// Starts recording for a pending Quick Dictation request. The saved
+    /// recordings check and an offline model download finish on their own and
+    /// trigger another attempt, so they are waited out instead of shown as
+    /// prompts. Other prompts are shown as usual; allowing one starts recording
+    /// and declining one ends the request.
+    private func startPendingQuickDictationIfPossible() {
+        guard QuickDictationIntentBridge.shared.isStartPending,
+              inlineRecording.state == .idle,
+              mobileAudioRecoveryReady
+        else { return }
+        if selectedModeNeedsOfflineRuntime, offlineModelIsBusy, !parakeetService.isModelDownloaded {
             return
         }
+        handleInlineRecordingTap()
     }
 
     private func handleInlineRecordingTap() {
@@ -1143,14 +1173,9 @@ struct ContentView: View {
                 self.inlineRecording.stopListening()
                 self.rearmQuickDictationAfterKeyboardSession()
             }
-            if QuickDictationIntentBridge.shared.isPending {
-                if recording.transcription.isEmpty == false {
-                    UIPasteboard.general.string = recording.transcription
-                    UINotificationFeedbackGenerator().notificationOccurred(.success)
-                    QuickDictationIntentBridge.shared.complete(with: recording.transcription)
-                } else {
-                    QuickDictationIntentBridge.shared.fail(QuickDictationIntentError.couldNotStart)
-                }
+            if QuickDictationIntentBridge.shared.finish(with: recording.transcription) {
+                UIPasteboard.general.string = recording.transcription
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
             }
             markRecordingAsNew(recording)
         }
@@ -1740,6 +1765,38 @@ struct ContentView: View {
 private struct ReferralShareItem: Identifiable {
     let id = UUID()
     let text: String
+}
+
+/// Passes recorder and setup changes to a pending Quick Dictation request, and
+/// retries its start when something that was holding it back finishes.
+private struct QuickDictationIntentObserver: ViewModifier {
+    let recorderState: InlineRecordingState
+    let recorderError: String?
+    let isModelDownloaded: Bool
+    let isOfflineModelBusy: Bool
+    let isRecoveryReady: Bool
+    let usesOnDeviceTranscription: Bool
+    let pickUpRequest: @MainActor () -> Void
+    let retryStart: @MainActor () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: QuickDictationIntentBridge.startNotification)) { _ in
+                pickUpRequest()
+            }
+            .onChange(of: recorderState) { state in
+                QuickDictationIntentBridge.shared.recorderStateChanged(isIdle: state == .idle)
+            }
+            .onChange(of: recorderError) { message in
+                if let message {
+                    QuickDictationIntentBridge.shared.recorderReportedError(message)
+                }
+            }
+            .onChange(of: isModelDownloaded) { _ in retryStart() }
+            .onChange(of: isOfflineModelBusy) { _ in retryStart() }
+            .onChange(of: isRecoveryReady) { _ in retryStart() }
+            .onChange(of: usesOnDeviceTranscription) { _ in retryStart() }
+    }
 }
 
 private struct KeyboardDictationReturnView: View {

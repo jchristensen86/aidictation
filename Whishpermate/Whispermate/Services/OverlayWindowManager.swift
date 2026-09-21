@@ -186,10 +186,8 @@ class OverlayWindowManager: ObservableObject {
         didSet {
             AppDefaults.shared.set(hideIdleState, forKey: Keys.hideIdleState)
 
-            // When hideIdleState changes and we're in idle state, update visibility
-            if overlayState == .idle {
-                transition(to: hideIdleState ? .hidden : .idle)
-            }
+            // When hideIdleState changes while the overlay is at rest, update visibility
+            settleRestingOverlay()
         }
     }
 
@@ -227,14 +225,11 @@ class OverlayWindowManager: ObservableObject {
 
     // MARK: - Overlay State (single source of truth)
 
-    enum OverlayState: Equatable {
-        case hidden
-        case idle
-        case recording(isCommandMode: Bool)
-        case processing(isCommandMode: Bool)
-    }
-
-    @Published private(set) var overlayState: OverlayState = .idle
+    /// Starts at rest for the saved "Show When Idle" choice, so the observers
+    /// that re-show a resting overlay leave a hidden one off screen.
+    @Published private(set) var overlayState: OverlayState = .resting(
+        hideIdleState: AppDefaults.shared.bool(forKey: Keys.hideIdleState)
+    )
 
     // MARK: - Private Properties
 
@@ -510,9 +505,22 @@ class OverlayWindowManager: ObservableObject {
         permissionIssue = nil
         keepIdleVisibleAfterCollapse = false
         positionStage()
-        if overlayState == .idle, hideIdleState {
+        settleRestingOverlay()
+    }
+
+    /// Moves a resting overlay into the state the "Show When Idle" choice calls
+    /// for, and makes the window agree. A missing-permission callout brings the
+    /// window forward without changing the state, so an overlay that is already
+    /// `.hidden` still needs its window ordered out here. While a callout is up
+    /// the window stays; clearing the callout settles the overlay.
+    private func settleRestingOverlay() {
+        guard permissionIssue == nil else { return }
+        let settledState = overlayState.settled(hideIdleState: hideIdleState)
+        if settledState == .hidden, overlayState == .hidden {
             overlayWindow?.orderOut(nil)
-        hideHoverTitle()
+            hideHoverTitle()
+        } else {
+            transition(to: settledState)
         }
     }
 

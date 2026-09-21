@@ -5,6 +5,7 @@ import AVFoundation
 import Combine
 import MediaPlayer
 import SwiftUI
+import UIKit
 import WhisperMateShared
 
 @MainActor
@@ -101,6 +102,9 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: KeyboardDictationHandoff.stopAppNotification)) { notification in
                 _ = notification
                 consumePendingKeyboardCommandIfNeeded()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: QuickDictationIntentBridge.startNotification)) { _ in
+                startQuickDictationIntent()
             }
             .alert("Login Unavailable", isPresented: $showLoginConfigurationAlert) {
                 Button("OK", role: .cancel) {}
@@ -1100,6 +1104,19 @@ struct ContentView: View {
         }
     }
 
+    private func startQuickDictationIntent() {
+        guard inlineRecording.state == .idle else {
+            QuickDictationIntentBridge.shared.fail(QuickDictationIntentError.couldNotStart)
+            return
+        }
+
+        handleInlineRecordingTap()
+        guard inlineRecording.state != .idle else {
+            QuickDictationIntentBridge.shared.fail(QuickDictationIntentError.couldNotStart)
+            return
+        }
+    }
+
     private func handleInlineRecordingTap() {
         DebugLog.info("inline primary action state=\(inlineRecording.state) selectedMode=\(selectedRecordingMode.displayName)", context: "KEYBOARD_DIAG")
         if inlineRecording.state == .idle {
@@ -1125,6 +1142,15 @@ struct ContentView: View {
                 self.inlineRecording.setKeyboardAttemptIdentity(nil)
                 self.inlineRecording.stopListening()
                 self.rearmQuickDictationAfterKeyboardSession()
+            }
+            if QuickDictationIntentBridge.shared.isPending {
+                if recording.transcription.isEmpty == false {
+                    UIPasteboard.general.string = recording.transcription
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    QuickDictationIntentBridge.shared.complete(with: recording.transcription)
+                } else {
+                    QuickDictationIntentBridge.shared.fail(QuickDictationIntentError.couldNotStart)
+                }
             }
             markRecordingAsNew(recording)
         }

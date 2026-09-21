@@ -1177,6 +1177,12 @@ struct ContentView: View {
             QuickDictationIntentBridge.shared.fail(.busy)
             return
         }
+        let requestID = QuickDictationIntentBridge.shared.requestID
+        QuickDictationIntentBridge.shared.setCancellationHandler {
+            showCloudTranscriptionConsent = false
+            showOfflineModelAlert = false
+            inlineRecording.cancelQuickDictation(requestID: requestID)
+        }
         // Clear an earlier error so a new one from this attempt is noticed.
         inlineRecording.errorMessage = nil
         startPendingQuickDictationIfPossible()
@@ -1213,6 +1219,8 @@ struct ContentView: View {
             shortcutManager: shortcutManager,
             selectedPreset: recordingPreset(for: selectedRecordingMode, manager: toneStyleManager),
             keyboardIdentity: activeKeyboardDictationIdentity,
+            quickDictationRequestID: QuickDictationIntentBridge.shared.isStartPending && activeKeyboardDictationIdentity == nil
+                ? QuickDictationIntentBridge.shared.requestID : nil,
             keepAudioBridgeAliveAfterStop: activeKeyboardDictationIdentity != nil
         ) { recording in
                 if let activeKeyboardDictationIdentity {
@@ -2660,6 +2668,8 @@ private final class InlineRecordingCoordinator: ObservableObject {
     private var activeTranscriptionOptions: TranscriptionOptions?
     private var keyboardAttemptIdentity: KeyboardDictationHandoff.AttemptIdentity?
     private var stopRequestedWhilePreparing = false
+    private var quickDictationRequestID: Int?
+    private var pendingPermissionRequestID: UUID?
     private var pendingAttemptID: UUID?
     private weak var pendingAttemptRecorder: AudioRecorder?
     private var cancelledPendingAttemptID: UUID?
@@ -2754,11 +2764,13 @@ private final class InlineRecordingCoordinator: ObservableObject {
         shortcutManager: ShortcutManager,
         selectedPreset: ContextRule?,
         keyboardIdentity: KeyboardDictationHandoff.AttemptIdentity? = nil,
+        quickDictationRequestID: Int? = nil,
         keepAudioBridgeAliveAfterStop: Bool = false,
         onCompleted: @escaping (Recording) -> Void
     ) {
         switch state {
         case .idle:
+            self.quickDictationRequestID = quickDictationRequestID
             startRecording(
                 historyManager: historyManager,
                 dictionaryManager: dictionaryManager,
@@ -2884,7 +2896,14 @@ private final class InlineRecordingCoordinator: ObservableObject {
         }
     }
 
+    func cancelQuickDictation(requestID: Int) {
+        guard quickDictationRequestID == requestID else { return }
+        stopListening()
+    }
+
     func stopListening() {
+        quickDictationRequestID = nil
+        pendingPermissionRequestID = nil
         realtimeTranscription.cancel(recorder: audioRecorder)
         activeAttemptTask?.cancel()
         captureDeadlineTask?.cancel()
@@ -3149,8 +3168,12 @@ private final class InlineRecordingCoordinator: ObservableObject {
             showError(message)
         case .undetermined:
             DebugLog.info("requesting microphone permission", context: "KEYBOARD_DIAG")
+            let permissionRequestID = UUID()
+            pendingPermissionRequestID = permissionRequestID
             AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
                 DispatchQueue.main.async {
+                    guard self?.pendingPermissionRequestID == permissionRequestID else { return }
+                    self?.pendingPermissionRequestID = nil
                     DebugLog.info("microphone permission response granted=\(granted)", context: "KEYBOARD_DIAG")
                     if granted {
                         self?.beginRecording(
@@ -3968,6 +3991,8 @@ private final class InlineRecordingCoordinator: ObservableObject {
     }
 
     private func reset(keepAudioBridgeAlive: Bool = false) {
+        quickDictationRequestID = nil
+        pendingPermissionRequestID = nil
         captureDeadlineTask?.cancel()
         captureDeadlineTask = nil
         if keepAudioBridgeAlive {

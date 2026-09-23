@@ -41,8 +41,11 @@ public final class SharedParakeetTranscriptionService: ObservableObject {
     private var initializationTask: Task<Void, Error>?
     private let runtimeBridgeSlot = RuntimeBridgeSlot()
     @MainActor private var runtimePublicationFence = RuntimeGenerationPublicationFence()
+    @MainActor private var modelDownloadRevision = 0
 
-    private init() {}
+    private init() {
+        refreshModelDownloadState()
+    }
 
     public func initialize() async throws {
         guard Self.isRuntimeSupported else {
@@ -86,14 +89,13 @@ public final class SharedParakeetTranscriptionService: ObservableObject {
                     await publishRuntimeState(generation, state: .ready, isModelDownloaded: true)
                 } catch is CancellationError {
                     ownership.cancel()
-                    await publishRuntimeState(generation, state: .notInitialized, isModelDownloaded: false)
+                    await publishRuntimeState(generation, state: .notInitialized)
                     throw CancellationError()
                 } catch {
                     ownership.cancel()
                     await publishRuntimeState(
                         generation,
-                        state: .error(error.localizedDescription),
-                        isModelDownloaded: false
+                        state: .error(error.localizedDescription)
                     )
                     throw error
                 }
@@ -149,14 +151,13 @@ public final class SharedParakeetTranscriptionService: ObservableObject {
                 return text
             } catch is CancellationError {
                 ownership.cancel()
-                await publishRuntimeState(generation, state: .notInitialized, isModelDownloaded: false)
+                await publishRuntimeState(generation, state: .notInitialized)
                 throw CancellationError()
             } catch {
                 ownership.cancel()
                 await publishRuntimeState(
                     generation,
-                    state: .error(error.localizedDescription),
-                    isModelDownloaded: false
+                    state: .error(error.localizedDescription)
                 )
                 throw error
             }
@@ -197,14 +198,13 @@ public final class SharedParakeetTranscriptionService: ObservableObject {
                 return text
             } catch is CancellationError {
                 ownership.cancel()
-                await publishRuntimeState(generation, state: .notInitialized, isModelDownloaded: false)
+                await publishRuntimeState(generation, state: .notInitialized)
                 throw CancellationError()
             } catch {
                 ownership.cancel()
                 await publishRuntimeState(
                     generation,
-                    state: .error(error.localizedDescription),
-                    isModelDownloaded: false
+                    state: .error(error.localizedDescription)
                 )
                 throw error
             }
@@ -223,7 +223,6 @@ public final class SharedParakeetTranscriptionService: ObservableObject {
 
         _ = runtimePublicationFence.invalidate(invalidation.generation)
         state = .notInitialized
-        isModelDownloaded = false
 
         if let bridge = invalidation.bridge {
             callVoidSelector("cleanupRuntime", on: bridge)
@@ -239,6 +238,7 @@ public final class SharedParakeetTranscriptionService: ObservableObject {
         _ = runtimePublicationFence.invalidate(invalidation.generation)
         state = .notInitialized
         isModelDownloaded = false
+        modelDownloadRevision += 1
         initializationTask = nil
 
         if let bridge = invalidation.bridge {
@@ -246,6 +246,45 @@ public final class SharedParakeetTranscriptionService: ObservableObject {
         } else {
             clearModelCacheFallback()
         }
+    }
+
+    /// Sets `isModelDownloaded` from the files on disk, so a model downloaded
+    /// before this launch shows as downloaded before anything loads it. The
+    /// runtime framework loads off the main thread, and a newer explicit change
+    /// to the flag wins over a check that started before it.
+    private func refreshModelDownloadState() {
+        guard Self.isRuntimeSupported else { return }
+        Task { @MainActor [weak self] in
+            guard let revision = self?.modelDownloadRevision else { return }
+            let downloaded = await Task.detached(priority: .utility) {
+                SharedParakeetTranscriptionService.modelsAreDownloadedOnDisk()
+            }.value
+            guard let self, let downloaded, self.modelDownloadRevision == revision else { return }
+            self.isModelDownloaded = downloaded
+        }
+    }
+
+    /// Asks the runtime whether the model files are on disk, without creating a
+    /// bridge or loading the model. Nil when the runtime can't be reached.
+    nonisolated private static func modelsAreDownloadedOnDisk() -> Bool? {
+        guard let bundle = runtimeFrameworkBundle() else { return nil }
+        if !bundle.isLoaded {
+            do {
+                try bundle.loadAndReturnError()
+            } catch {
+                return nil
+            }
+        }
+
+        let runtimeClass: AnyClass? = NSClassFromString("ParakeetRuntime.ParakeetRuntimeBridge")
+            ?? NSClassFromString("ParakeetRuntimeBridge")
+        let selector = NSSelectorFromString("modelsAreDownloaded")
+        guard let runtimeClass, let method = class_getClassMethod(runtimeClass, selector) else {
+            return nil
+        }
+
+        typealias Function = @convention(c) (AnyObject, Selector) -> Bool
+        return unsafeBitCast(method_getImplementation(method), to: Function.self)(runtimeClass as AnyObject, selector)
     }
 
     private func clearModelCacheFallback() {
@@ -287,6 +326,7 @@ public final class SharedParakeetTranscriptionService: ObservableObject {
         state = newState
         if let newDownloadState {
             isModelDownloaded = newDownloadState
+            modelDownloadRevision += 1
         }
         return true
     }
@@ -303,7 +343,7 @@ public final class SharedParakeetTranscriptionService: ObservableObject {
             return runtimeBridge
         }
 
-        guard let bundle = runtimeFrameworkBundle() else {
+        guard let bundle = Self.runtimeFrameworkBundle() else {
             throw runtimeError("Offline mode is missing from this build.")
         }
 
@@ -328,7 +368,7 @@ public final class SharedParakeetTranscriptionService: ObservableObject {
         return installed
     }
 
-    private func runtimeFrameworkBundle() -> Bundle? {
+    nonisolated private static func runtimeFrameworkBundle() -> Bundle? {
         let frameworkName = "ParakeetRuntime.framework"
         let appFrameworkURL = Bundle.main.privateFrameworksURL?.appendingPathComponent(frameworkName)
         let containingAppFrameworkURL = Bundle.main.bundleURL

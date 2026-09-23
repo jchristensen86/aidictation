@@ -1267,12 +1267,17 @@ struct SettingsView: View {
 
                         switch parakeetService.state {
                         case .notInitialized:
-                            Button("Download Model (~500 MB)") {
-                                Task {
-                                    try? await parakeetService.initialize()
+                            if parakeetService.isModelDownloaded {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                            } else {
+                                Button("Download Model (~500 MB)") {
+                                    Task {
+                                        try? await parakeetService.initialize()
+                                    }
                                 }
+                                .controlSize(.small)
                             }
-                            .controlSize(.small)
                         case .downloading, .initializing:
                             ProgressView()
                                 .controlSize(.small)
@@ -1327,7 +1332,7 @@ struct SettingsView: View {
 
         switch parakeetService.state {
         case .notInitialized:
-            return "Model not downloaded"
+            return parakeetService.isModelDownloaded ? "Ready" : "Model not downloaded"
         case .downloading:
             return "Downloading model..."
         case .initializing:
@@ -1344,6 +1349,8 @@ struct SettingsView: View {
     private var parakeetStatusColor: Color {
         switch parakeetService.state {
         case .ready, .transcribing:
+            return .green
+        case .notInitialized where parakeetService.isModelDownloaded:
             return .green
         case .error:
             return .red

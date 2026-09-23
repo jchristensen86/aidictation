@@ -77,6 +77,18 @@ func loadBridge(from appURL: URL) -> NSObject {
     return bridgeClass.init()
 }
 
+/// Calls the runtime's class method the same way the transcription services do.
+func modelsAreDownloaded(_ bridge: NSObject) -> Bool {
+    let bridgeClass: AnyClass = type(of: bridge)
+    let selector = NSSelectorFromString("modelsAreDownloaded")
+    guard let method = class_getClassMethod(bridgeClass, selector) else {
+        fail("Parakeet runtime does not expose the class method modelsAreDownloaded")
+    }
+
+    typealias Function = @convention(c) (AnyObject, Selector) -> Bool
+    return unsafeBitCast(method_getImplementation(method), to: Function.self)(bridgeClass as AnyObject, selector)
+}
+
 func initialize(_ bridge: NSObject) {
     let selector = NSSelectorFromString("initializeWithCompletion:")
     guard bridge.responds(to: selector),
@@ -157,7 +169,11 @@ if #available(macOS 14.0, *) {
 
     generateAudio(at: audioURL)
     let bridge = loadBridge(from: appURL)
+    print("offline model on disk before initialization: \(modelsAreDownloaded(bridge))")
     initialize(bridge)
+    guard modelsAreDownloaded(bridge) else {
+        fail("modelsAreDownloaded reports no model after a successful initialization")
+    }
     let text = transcribe(bridge, audioURL: audioURL)
     let lowered = text.lowercased()
 

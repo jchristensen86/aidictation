@@ -40,6 +40,14 @@ public final class ParakeetRuntimeBridge: NSObject {
         stateRaw as NSString
     }
 
+    /// Whether the offline model is already on disk, decided the same way
+    /// `AsrModels.downloadAndLoad(version: .v3)` decides whether to download.
+    /// Only checks files; nothing is loaded.
+    @objc(modelsAreDownloaded)
+    public static func modelsAreDownloaded() -> Bool {
+        AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: .v3), version: .v3)
+    }
+
     @objc(initializeWithCompletion:)
     public func initialize(completion: @escaping (Bool, NSString?) -> Void) {
         initialize(attemptID: UUID().uuidString as NSString, completion: completion)

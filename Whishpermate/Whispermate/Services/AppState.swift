@@ -1766,6 +1766,7 @@ class AppState: ObservableObject {
                         recordingID: record.recordingID,
                         expectedRevision: record.revision
                     ) {
+                        MacInstallationAnalytics.transcriptionCompleted(recordingID: record.recordingID, words: claimed)
                         await SubscriptionManager.shared.recordWords(claimed)
                     }
                 } catch {
@@ -2366,6 +2367,7 @@ class AppState: ObservableObject {
                     wordCount: usageWordCount
                 ) {
                     Task {
+                        MacInstallationAnalytics.transcriptionCompleted(recordingID: recording.id, words: claimed)
                         await SubscriptionManager.shared.recordWords(claimed)
                     }
                 }
@@ -2393,6 +2395,7 @@ class AppState: ObservableObject {
                         wordCount: usageWordCount
                     ) {
                         DictationStopwatch.mark("usage claimed (off critical path)")
+                        MacInstallationAnalytics.transcriptionCompleted(recordingID: recording.id, words: claimed)
                         await SubscriptionManager.shared.recordWords(claimed)
                     }
                 } catch {

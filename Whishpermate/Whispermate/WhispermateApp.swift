@@ -6,8 +6,174 @@
 //
 
 import CoreText
+internal import Combine
 import SwiftUI
 import WhisperMateShared
+
+@MainActor
+enum MacInstallationAnalytics {
+    private struct Event: Codable {
+        let event_id: String
+        let installation_id: String
+        let anonymous_id: String
+        let platform: String
+        let event_name: String
+        let word_count: Int
+        let user_id: String?
+    }
+
+    private static let installationKey = "analyticsInstallationID"
+    private static let anonymousKey = "analyticsAnonymousID"
+    private static let lastUserKey = "analyticsLastUserID"
+    private static let pendingKey = "pendingInstallationEvents"
+    private static var flushing = false
+    private static var retryScheduled = false
+    private static var lastSignedInUser: UUID?
+
+    private static var installationID: String {
+        let defaults = AppDefaults.shared
+        if let stored = defaults.string(forKey: installationKey), UUID(uuidString: stored) != nil {
+            return stored
+        }
+        let created = UUID().uuidString.lowercased()
+        defaults.set(created, forKey: installationKey)
+        return created
+    }
+
+    private static var anonymousID: String {
+        let defaults = AppDefaults.shared
+        if let stored = defaults.string(forKey: anonymousKey), UUID(uuidString: stored) != nil {
+            return stored
+        }
+        let created = UUID().uuidString.lowercased()
+        defaults.set(created, forKey: anonymousKey)
+        return created
+    }
+
+    private static func rotateAnonymousID() {
+        AppDefaults.shared.set(UUID().uuidString.lowercased(), forKey: anonymousKey)
+    }
+
+    private static var pending: [Event] {
+        get {
+            guard let data = AppDefaults.shared.data(forKey: pendingKey) else { return [] }
+            return (try? JSONDecoder().decode([Event].self, from: data)) ?? []
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) {
+                AppDefaults.shared.set(data, forKey: pendingKey)
+            }
+        }
+    }
+
+    static func start() {
+        record("app_opened", eventID: UUID(), words: 0)
+        Task { await flush() }
+    }
+
+    static func signedIn(_ userID: UUID) {
+        guard lastSignedInUser != userID else { return }
+        let canonicalID = userID.uuidString.lowercased()
+        if let previous = AppDefaults.shared.string(forKey: lastUserKey), previous != canonicalID {
+            rotateAnonymousID()
+        }
+        AppDefaults.shared.set(canonicalID, forKey: lastUserKey)
+        lastSignedInUser = userID
+        record("signed_in", eventID: UUID(), words: 0)
+    }
+
+    static func signedOut() {
+        guard lastSignedInUser != nil else { return }
+        lastSignedInUser = nil
+        AppDefaults.shared.removeObject(forKey: lastUserKey)
+        rotateAnonymousID()
+    }
+
+    static func transcriptionCompleted(recordingID: UUID, words: Int) {
+        guard words > 0 else { return }
+        record("transcription_completed", eventID: recordingID, words: words)
+    }
+
+    private static func record(_ name: String, eventID: UUID, words: Int) {
+        let id = eventID.uuidString.lowercased()
+        var events = pending
+        guard !events.contains(where: { $0.event_id == id }) else { return }
+        events.append(Event(
+            event_id: id,
+            installation_id: installationID,
+            anonymous_id: anonymousID,
+            platform: "macos",
+            event_name: name,
+            word_count: words,
+            user_id: AuthManager.shared.currentUser?.userId.uuidString.lowercased()
+        ))
+        pending = events
+        Task { await flush() }
+    }
+
+    private static func flush() async {
+        guard !flushing else { return }
+        guard let origin = SecretsLoader.getValue(for: "SUPABASE_URL"),
+              let url = URL(string: origin.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/api/installation-event")
+        else { return }
+
+        flushing = true
+        defer { flushing = false }
+        while let event = pending.first(where: {
+            $0.user_id == nil || $0.user_id == AuthManager.shared.currentUser?.userId.uuidString.lowercased()
+        }) {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 8
+            request.setValue("application/json", forHTTPHeaderField: "content-type")
+            request.httpBody = try? JSONEncoder().encode(event)
+            if let userID = event.user_id {
+                guard AuthManager.shared.currentUser?.userId.uuidString.lowercased() == userID,
+                      let token = try? await AuthManager.shared.accessToken()
+                else {
+                    scheduleRetry()
+                    return
+                }
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
+            }
+
+            do {
+                let (_, response) = try await URLSession.shared.data(for: request)
+                guard let response = response as? HTTPURLResponse else {
+                    scheduleRetry()
+                    return
+                }
+                if !(200..<300).contains(response.statusCode) {
+                    if (400..<500).contains(response.statusCode),
+                       response.statusCode != 401, response.statusCode != 429 {
+                        remove(event.event_id)
+                        continue
+                    }
+                    scheduleRetry()
+                    return
+                }
+                remove(event.event_id)
+            } catch {
+                scheduleRetry()
+                return
+            }
+        }
+    }
+
+    private static func remove(_ eventID: String) {
+        pending = pending.filter { $0.event_id != eventID }
+    }
+
+    private static func scheduleRetry() {
+        guard !retryScheduled else { return }
+        retryScheduled = true
+        Task {
+            try? await Task.sleep(nanoseconds: 60_000_000_000)
+            retryScheduled = false
+            await flush()
+        }
+    }
+}
 
 private enum AppWindowDefaults {
     static let mainFrameSize = NSSize(width: 900, height: 760)
@@ -144,10 +310,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let authManager = AuthManager.shared
     private let subscriptionManager = SubscriptionManager.shared
     private let terminationReplyGuard = MacTerminationReplyGuard()
+    private var analyticsAuthObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_: Notification) {
         ReleaseAuthVerificationReporter.shared.startIfRequested()
         SentryTelemetry.start()
+        MacInstallationAnalytics.start()
+        analyticsAuthObserver = authManager.$currentUser.sink { user in
+            Task { @MainActor in
+                if let user {
+                    MacInstallationAnalytics.signedIn(user.userId)
+                } else {
+                    MacInstallationAnalytics.signedOut()
+                }
+            }
+        }
         DockIconManager.shared.applySavedPreference()
         statusBarManager.setupMenuBar()
         _ = UpdateManager.shared

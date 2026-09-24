@@ -2199,7 +2199,7 @@ class AppState: ObservableObject {
                 // History retry uses, instead of failing a usable recording.
                 guard let uploadSnapshot = snapshot.usingSonioxUpload() else {
                     DebugLog.error(
-                        "Realtime stream ended without a transcript and no upload route exists provider=\(snapshot.provider.rawValue) durationSeconds=\(recording.duration)",
+                        "Realtime stream ended without a transcript and no upload route exists provider=\(snapshot.provider.rawValue) durationSeconds=\(recording.duration ?? 0)",
                         context: "RealtimeFallback"
                     )
                     CrashReporter.captureError(
@@ -2218,7 +2218,7 @@ class AppState: ObservableObject {
                 }
                 recognitionSnapshot = uploadSnapshot
                 DebugLog.error(
-                    "Realtime stream ended without a transcript; recognizing the saved recording by upload provider=\(snapshot.provider.rawValue) durationSeconds=\(recording.duration)",
+                    "Realtime stream ended without a transcript; recognizing the saved recording by upload provider=\(snapshot.provider.rawValue) durationSeconds=\(recording.duration ?? 0)",
                     context: "RealtimeFallback"
                 )
                 CrashReporter.captureError(

@@ -123,6 +123,15 @@ nonisolated struct MacTranscriptionAttemptSnapshot: @unchecked Sendable {
     let vadEnabled: Bool
     let vadThreshold: Float
     let networkWasConnected: Bool
+    /// Upload recognition for the finalized recording, used when a live
+    /// stream ends without a transcript. Nil when no upload route exists.
+    var sonioxUpload: SonioxUpload? = nil
+
+    struct SonioxUpload: Sendable {
+        let endpoint: String
+        let model: String
+        let apiKey: String?
+    }
 
     func withContext(
         appContext: String?,
@@ -191,7 +200,50 @@ nonisolated struct MacTranscriptionAttemptSnapshot: @unchecked Sendable {
             screenContext: screenContext,
             vadEnabled: vadEnabled,
             vadThreshold: vadThreshold,
-            networkWasConnected: networkWasConnected
+            networkWasConnected: networkWasConnected,
+            sonioxUpload: sonioxUpload
+        )
+    }
+
+    /// The same attempt, recognized by uploading the finalized recording.
+    /// Vocabulary, prompts, cleanup and context stay unchanged; only the
+    /// recognition route moves from the live stream to the upload endpoint.
+    func usingSonioxUpload() -> MacTranscriptionAttemptSnapshot? {
+        guard let sonioxUpload else { return nil }
+        return MacTranscriptionAttemptSnapshot(
+            outputMode: outputMode,
+            transcriptionOptions: transcriptionOptions,
+            mode: mode,
+            provider: provider,
+            transport: .batch,
+            transcriptionEndpoint: sonioxUpload.endpoint,
+            transcriptionModel: sonioxUpload.model,
+            transcriptionAPIKey: sonioxUpload.apiKey,
+            customRealtimeEndpoint: nil,
+            customRealtimeModel: nil,
+            llmPostProcessingEnabled: llmPostProcessingEnabled,
+            postProcessingProvider: postProcessingProvider,
+            llmEndpoint: llmEndpoint,
+            llmModel: llmModel,
+            llmAPIKey: llmAPIKey,
+            aidictationPostProcessingEndpoint: aidictationPostProcessingEndpoint,
+            aidictationPostProcessingKey: aidictationPostProcessingKey,
+            languageCode: languageCode,
+            languageCodes: languageCodes,
+            transcriptionKeywords: transcriptionKeywords,
+            recordingPrompt: recordingPrompt,
+            sttHintPrompt: sttHintPrompt,
+            cleanupPromptComponents: cleanupPromptComponents,
+            baseCleanupPromptComponents: baseCleanupPromptComponents,
+            shortcutExpansions: shortcutExpansions,
+            contextRules: contextRules,
+            usesContextRules: usesContextRules,
+            appContext: appContext,
+            screenContext: screenContext,
+            vadEnabled: vadEnabled,
+            vadThreshold: vadThreshold,
+            networkWasConnected: networkWasConnected,
+            sonioxUpload: nil
         )
     }
 

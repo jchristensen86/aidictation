@@ -354,6 +354,75 @@ struct ValidateMacOSTranscriptionAttemptSnapshot {
             "sourceIntegrity: finalIsCheckpointed ? .complete : .unfinalized"
         ))
 
+        // A live stream that ends without text must recognize the finalized
+        // recording by upload. Only the recognition route may change.
+        precondition(
+            snapshot.usingSonioxUpload() == nil,
+            "An attempt without an upload route must not invent one"
+        )
+        var streaming = capture(MutableAttemptSettings())
+        streaming.sonioxUpload = .init(
+            endpoint: "https://upload.example/transcribe",
+            model: "upload-model",
+            apiKey: "upload-key"
+        )
+        let contextual = streaming.withContext(
+            appContext: "Context app",
+            screenContext: "Context screen"
+        )
+        precondition(
+            contextual.sonioxUpload?.endpoint == "https://upload.example/transcribe",
+            "Resolving app context must keep the upload route"
+        )
+        guard let upload = contextual.usingSonioxUpload() else {
+            fatalError("An attempt with an upload route must produce an upload snapshot")
+        }
+        precondition(upload.transport == .batch)
+        precondition(upload.transcriptionEndpoint == "https://upload.example/transcribe")
+        precondition(upload.transcriptionModel == "upload-model")
+        precondition(upload.transcriptionAPIKey == "upload-key")
+        precondition(upload.customRealtimeEndpoint == nil)
+        precondition(upload.customRealtimeModel == nil)
+        precondition(upload.sonioxUpload == nil, "The upload attempt must not fall back again")
+        precondition(upload.provider == contextual.provider)
+        precondition(upload.mode == contextual.mode)
+        precondition(upload.outputMode == contextual.outputMode)
+        precondition(upload.transcriptionOptions == contextual.transcriptionOptions)
+        precondition(upload.transcriptionKeywords == contextual.transcriptionKeywords)
+        precondition(upload.recordingPrompt == contextual.recordingPrompt)
+        precondition(upload.sttHintPrompt == contextual.sttHintPrompt)
+        precondition(upload.cleanupPromptComponents == contextual.cleanupPromptComponents)
+        precondition(upload.baseCleanupPromptComponents == contextual.baseCleanupPromptComponents)
+        precondition(upload.shortcutExpansions.map(\.trigger) == contextual.shortcutExpansions.map(\.trigger))
+        precondition(upload.contextRules.map(\.name) == contextual.contextRules.map(\.name))
+        precondition(upload.llmEndpoint == contextual.llmEndpoint)
+        precondition(upload.llmModel == contextual.llmModel)
+        precondition(upload.llmAPIKey == contextual.llmAPIKey)
+        precondition(upload.languageCode == contextual.languageCode)
+        precondition(upload.languageCodes == contextual.languageCodes)
+        precondition(upload.appContext == contextual.appContext)
+        precondition(upload.screenContext == contextual.screenContext)
+        precondition(upload.vadEnabled == contextual.vadEnabled)
+        precondition(upload.vadThreshold == contextual.vadThreshold)
+        precondition(upload.networkWasConnected == contextual.networkWasConnected)
+
+        precondition(
+            source.contains("guard let uploadSnapshot = snapshot.usingSonioxUpload() else {"),
+            "An empty live stream must try the upload route before failing"
+        )
+        precondition(
+            source.contains("snapshot: routedSnapshot,"),
+            "Recognition must use the routed snapshot, not the live-stream snapshot"
+        )
+        precondition(
+            source.contains("sonioxUpload: provider == .soniox && transport == .realtime"),
+            "Soniox live attempts must carry the upload route"
+        )
+        precondition(
+            source.contains("endpoint = sonioxUpload.endpoint"),
+            "History retry and the live fallback must share one upload route"
+        )
+
         print("PASS: macOS attempt settings are immutable and chunk cleanup has one owner")
     }
 }

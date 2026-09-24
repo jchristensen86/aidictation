@@ -2189,20 +2189,46 @@ class AppState: ObservableObject {
                 realtimeResult = nil
             }
 
+            var recognitionSnapshot = snapshot
             if activeTransport == .realtime,
                (snapshot.mode != .auto || snapshot.networkWasConnected),
                realtimeResult == nil
             {
-                throw NSError(
-                    domain: "AppState",
-                    code: -9,
-                    userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "Realtime transcription did not complete. Your recording is saved."
-                    ]
+                // The live stream ended without text, but the finalized
+                // recording is durable. Recognize it by upload, the same route
+                // History retry uses, instead of failing a usable recording.
+                guard let uploadSnapshot = snapshot.usingSonioxUpload() else {
+                    DebugLog.error(
+                        "Realtime stream ended without a transcript and no upload route exists provider=\(snapshot.provider.rawValue) durationSeconds=\(recording.duration)",
+                        context: "RealtimeFallback"
+                    )
+                    CrashReporter.captureError(
+                        "Realtime stream ended without a transcript; no upload route",
+                        context: "RealtimeFallback",
+                        feature: "transcription"
+                    )
+                    throw NSError(
+                        domain: "AppState",
+                        code: -9,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "Realtime transcription did not complete. Your recording is saved."
+                        ]
+                    )
+                }
+                recognitionSnapshot = uploadSnapshot
+                DebugLog.error(
+                    "Realtime stream ended without a transcript; recognizing the saved recording by upload provider=\(snapshot.provider.rawValue) durationSeconds=\(recording.duration)",
+                    context: "RealtimeFallback"
+                )
+                CrashReporter.captureError(
+                    "Realtime stream ended without a transcript; used upload fallback",
+                    context: "RealtimeFallback",
+                    feature: "transcription"
                 )
             }
 
+            let routedSnapshot = recognitionSnapshot
             let result = try await withTimeout(
                 seconds: recognitionTimeoutSeconds(for: recording.duration)
             ) {
@@ -2260,7 +2286,7 @@ class AppState: ObservableObject {
                     audioURL: audioURL,
                     clipboardContent: nil,
                     transientWorkspace: transientWorkspace,
-                    snapshot: snapshot,
+                    snapshot: routedSnapshot,
                     onRecognitionCheckpoint: { text in
                         try await session.checkpoint(text)
                     },
@@ -2988,12 +3014,12 @@ class AppState: ObservableObject {
         let model: String
         let transport: TranscriptionTransport
         let transcriptionAPIKey: String?
+        let sonioxUpload = sonioxUploadRecognitionRoute()
         if provider == .soniox, isRetranscription {
-            endpoint = SecretsLoader.customTranscriptionEndpoint()
-                ?? TranscriptionProvider.aidictation.defaultEndpoint
-            model = "soniox/stt-async-v5"
+            endpoint = sonioxUpload.endpoint
+            model = sonioxUpload.model
             transport = .batch
-            transcriptionAPIKey = resolvedTranscriptionApiKey(for: .aidictation)
+            transcriptionAPIKey = sonioxUpload.apiKey
         } else if provider == .aidictation {
             endpoint = SecretsLoader.customTranscriptionEndpoint()
                 ?? provider.defaultEndpoint
@@ -3074,7 +3100,23 @@ class AppState: ObservableObject {
             screenContext: screenContext,
             vadEnabled: vadSettingsManager.vadEnabled,
             vadThreshold: vadSettingsManager.sensitivityThreshold,
-            networkWasConnected: NetworkMonitor.shared.isConnected
+            networkWasConnected: NetworkMonitor.shared.isConnected,
+            sonioxUpload: provider == .soniox && transport == .realtime
+                ? sonioxUpload
+                : nil
+        )
+    }
+
+    /// Soniox recognition of a finalized recording by upload. History retry and
+    /// the live-stream fallback share this route, so they cannot diverge.
+    private func sonioxUploadRecognitionRoute() -> MacTranscriptionAttemptSnapshot.SonioxUpload {
+        let endpoint = SecretsLoader.customTranscriptionEndpoint()
+            ?? TranscriptionProvider.aidictation.defaultEndpoint
+        let model = "soniox/stt-async-v5"
+        return MacTranscriptionAttemptSnapshot.SonioxUpload(
+            endpoint: endpoint,
+            model: model,
+            apiKey: resolvedTranscriptionApiKey(for: .aidictation)
         )
     }
 

@@ -1159,8 +1159,15 @@ actor MacAudioProcessingStore {
     }
 
     func beginCleanup(_ lease: Lease) async throws -> Mutation {
-        // Pure progress marker between two states that are both reconstructible.
-        try await transition(lease, from: .rawResultReady, to: .cleaning, durability: .ordered)
+        // Recognition has already saved complete raw text. Give optional
+        // cleanup its own bounded window instead of consuming recognition time.
+        try await transition(
+            lease,
+            from: .rawResultReady,
+            to: .cleaning,
+            deadline: testHooks.now().addingTimeInterval(55),
+            durability: .ordered
+        )
     }
 
     /// Empty or whitespace-only cleanup output falls back to the complete raw

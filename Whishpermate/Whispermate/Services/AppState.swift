@@ -87,6 +87,7 @@ class AppState: ObservableObject {
     private let commandDeliveryTimeoutSeconds: UInt64 = 45
     private let minimumRecognitionTimeoutSeconds: UInt64 = 90
     private let maximumRecognitionTimeoutSeconds: UInt64 = 600
+    private let realtimeFinishDeadlineSeconds: UInt64 = 7
     private let maximumCaptureDurationSeconds: UInt64 = 8 * 60 * 60
     private let recordingPreparationStoreDeadlineSeconds: UInt64 = 10
     private let recordingFinalizationStoreDeadlineSeconds: UInt64 = 60
@@ -1460,7 +1461,7 @@ class AppState: ObservableObject {
                 attemptID: attemptID,
                 expectedRevision: durableRecord.revision,
                 deadline: Date().addingTimeInterval(
-                    TimeInterval(recognitionTimeoutSeconds(for: recording.duration))
+                    TimeInterval(processingStoreDeadlineSeconds(for: recording.duration))
                 )
             )
             guard isCurrentAttempt(
@@ -2068,7 +2069,11 @@ class AppState: ObservableObject {
                 attemptID: recognitionAttemptID,
                 expectedRevision: ready.record.revision,
                 deadline: Date().addingTimeInterval(
-                    TimeInterval(recognitionTimeoutSeconds(for: finalizedRecordingDuration))
+                    TimeInterval(processingStoreDeadlineSeconds(
+                        for: finalizedRecordingDuration,
+                        includesRealtimeFinish: activeTranscriptionSnapshot?.outputMode == .dictation
+                            && activeTranscriptionSnapshot?.transport == .realtime
+                    ))
                 )
             )
             guard ownsProcessingAttempt(
@@ -2178,7 +2183,21 @@ class AppState: ObservableObject {
 
             let realtimeResult: String?
             if isLiveRecording, activeTransport == .realtime {
-                let result = await realtimeFinishRequest?.finish()?
+                // The stream can fail to complete on a cold launch. Bound this
+                // wait separately because the recognition deadline starts below.
+                let finished: String?
+                do {
+                    finished = try await withTimeout(seconds: realtimeFinishDeadlineSeconds) {
+                        await realtimeFinishRequest?.finish()
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    realtimeFinishRequest?.close()
+                    finished = nil
+                }
+                try Task.checkCancellation()
+                let result = finished?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if result?.isEmpty == false {
                     realtimeResult = result
@@ -2190,23 +2209,10 @@ class AppState: ObservableObject {
                 realtimeResult = nil
             }
 
-            if activeTransport == .realtime,
-               (snapshot.mode != .auto || snapshot.networkWasConnected),
-               realtimeResult == nil
-            {
-                throw NSError(
-                    domain: "AppState",
-                    code: -9,
-                    userInfo: [
-                        NSLocalizedDescriptionKey:
-                            "Realtime transcription did not complete. Your recording is saved."
-                    ]
-                )
-            }
-
-            let result = try await withTimeout(
-                seconds: recognitionTimeoutSeconds(for: recording.duration)
-            ) {
+            let recognitionTimeout = realtimeResult == nil && activeTransport == .realtime
+                ? realtimeFallbackTimeoutSeconds(for: recording.duration)
+                : recognitionTimeoutSeconds(for: recording.duration)
+            let result = try await withTimeout(seconds: recognitionTimeout) {
                 if realtimeResult == nil, snapshot.vadEnabled {
                     do {
                         let hasSpeech = try await VoiceActivityDetector.hasSpeech(
@@ -2609,6 +2615,26 @@ class AppState: ObservableObject {
         )
     }
 
+    private func processingStoreDeadlineSeconds(
+        for duration: TimeInterval?,
+        includesRealtimeFinish: Bool = false
+    ) -> UInt64 {
+        // Cleanup receives a separate deadline after raw text is durable.
+        // This deadline only covers recognition and terminal persistence.
+        (includesRealtimeFinish
+            ? realtimeFallbackTimeoutSeconds(for: duration)
+            : recognitionTimeoutSeconds(for: duration))
+            + (includesRealtimeFinish ? realtimeFinishDeadlineSeconds : 0)
+            + recordingPreparationStoreDeadlineSeconds
+    }
+
+    private func realtimeFallbackTimeoutSeconds(for duration: TimeInterval?) -> UInt64 {
+        min(
+            recognitionTimeoutSeconds(for: duration),
+            max(20, UInt64(max(0, duration ?? 0)) + 5)
+        )
+    }
+
     private func finishOverlayAfterRecording() {
         guard overlayManager.isOverlayMode else {
             shouldKeepOverlayIdleVisibleAfterCurrentRecording = false
@@ -2894,6 +2920,14 @@ class AppState: ObservableObject {
     ) -> RealtimeTranscriptionFinishRequest? {
         let client = realtimeTranscriptionClient
         realtimeTranscriptionClient = nil
+        if let startup = client as? MacRealtimeStartupAudio,
+           !startup.isConnected,
+           (finalizedRecordingDuration ?? 0) > 2 {
+            // No live connection was established. The durable recording is
+            // already available, so start batch recognition immediately.
+            startup.close()
+            return nil
+        }
         let request = client.map(RealtimeTranscriptionFinishRequest.init(client:))
 
         if let recordingID, let attemptID, let request {
@@ -3233,6 +3267,12 @@ class AppState: ObservableObject {
             guard let transcriptionApiKey = snapshot.transcriptionAPIKey else {
                 throw NSError(domain: "AppState", code: -1, userInfo: [NSLocalizedDescriptionKey: "Please set your \(provider.displayName) API key"])
             }
+            let batchEndpoint = provider == .soniox && transport == .realtime
+                ? TranscriptionProvider.aidictation.defaultEndpoint
+                : snapshot.transcriptionEndpoint
+            let batchModel = provider == .soniox && transport == .realtime
+                ? "soniox/stt-async-v5"
+                : snapshot.transcriptionModel
 
             let chatCompletionEndpoint: String
             let chatCompletionModel: String
@@ -3248,8 +3288,8 @@ class AppState: ObservableObject {
             }
 
             let config = OpenAIClient.Configuration(
-                transcriptionEndpoint: snapshot.transcriptionEndpoint,
-                transcriptionModel: snapshot.transcriptionModel,
+                transcriptionEndpoint: batchEndpoint,
+                transcriptionModel: batchModel,
                 chatCompletionEndpoint: chatCompletionEndpoint,
                 chatCompletionModel: chatCompletionModel,
                 apiKey: transcriptionApiKey,
@@ -3266,7 +3306,7 @@ class AppState: ObservableObject {
             )
             let rawText = try await client.transcribe(
                 audioURL: audioURL,
-                prompt: snapshot.transcriptionModel == "gpt-transcribe"
+                prompt: batchModel == "gpt-transcribe"
                     ? snapshot.recordingPrompt
                     : (sttHintPrompt.isEmpty ? nil : sttHintPrompt),
                 language: snapshot.languageCode,

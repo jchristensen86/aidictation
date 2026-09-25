@@ -20,6 +20,8 @@
 
 ## Audio Processing Recovery
 
+- Before merging or tagging an audio-processing change, read every review finding and resolve credible P1/P2 findings with a regression check that exercises the affected route, timeout, or state transition. A green review status alone does not clear unresolved findings. Run the Apple audio recovery matrix and macOS release preflight after the last code change; merge only when those checks and the PR build checks pass.
+
 - Follow `docs/audio-processing-failure-contract.md` on macOS, iOS and its keyboard extension, Android, and Windows.
 - Persist managed source audio and a stable recording ID before recognition. Every attempt must have one owner, a deadline, cancellation, ordered checkpoints, and a terminal persisted state.
 - A timeout must return the UI to idle even when native work ignores cancellation. Fence late callbacks so an abandoned attempt cannot overwrite, recreate, or delete newer state.

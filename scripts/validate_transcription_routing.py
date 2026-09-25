@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import re
 from pathlib import Path
 
 
@@ -55,8 +56,8 @@ require(
     "History does not offer offline re-transcription in both the toolbar and the context menu",
 )
 require(
-    HISTORY.count("onlineProvider:") == 1,
-    "History exposes more than one online re-transcription route",
+    set(re.findall(r"onlineProvider:\s*\.(\w+)", HISTORY)) <= {"soniox"},
+    "History exposes an online re-transcription route other than AI Dictation",
 )
 require(
     "mode: .auto" not in HISTORY and "retry(mode:" not in HISTORY,

@@ -43,6 +43,25 @@ require(
 require("RetranscriptionRouteMenu" not in HISTORY, "History still exposes a provider switch")
 require('Button("ChatGPT")' not in HISTORY, "History still exposes ChatGPT transcription")
 require('Text("Cloud Model")' not in SETTINGS, "Settings still exposes a cloud-model switch")
+RETRANSCRIBE_OFFLINE = APP_STATE.split("func retranscribeOffline(", 1)[-1].split("\n    }\n", 1)[0]
+require(
+    "offlineRetranscribeOption.isEnabled" in RETRANSCRIBE_OFFLINE
+    and "mode: .local" in RETRANSCRIBE_OFFLINE
+    and "onlineProvider" not in RETRANSCRIBE_OFFLINE,
+    "History offline re-transcription does not stay on this Mac behind the downloaded-model check",
+)
+require(
+    HISTORY.count("appState.retranscribeOffline(recording: recording)") == 2,
+    "History does not offer offline re-transcription in both the toolbar and the context menu",
+)
+require(
+    HISTORY.count("onlineProvider:") == 1,
+    "History exposes more than one online re-transcription route",
+)
+require(
+    "mode: .auto" not in HISTORY and "retry(mode:" not in HISTORY,
+    "History exposes a transcription mode switch beyond Online and Offline",
+)
 require(
     'https://chatgpt.com/backend-api/transcribe' in PROVIDERS,
     "ChatGPT batch transcription endpoint is missing",

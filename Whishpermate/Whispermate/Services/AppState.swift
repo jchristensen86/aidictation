@@ -3269,8 +3269,7 @@ class AppState: ObservableObject {
                 transport: transport
             )
             guard let transcriptionApiKey = batchRoute.apiKey,
-                  !transcriptionApiKey.isEmpty,
-                  transcriptionApiKey != "not-needed" else {
+                  !transcriptionApiKey.isEmpty else {
                 throw NSError(domain: "AppState", code: -1, userInfo: [NSLocalizedDescriptionKey: "Please set your \(provider.displayName) API key"])
             }
             let batchEndpoint = batchRoute.endpoint

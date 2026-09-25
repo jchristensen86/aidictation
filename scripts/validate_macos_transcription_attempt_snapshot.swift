@@ -131,6 +131,14 @@ struct ValidateMacOSTranscriptionAttemptSnapshot {
         precondition(aidictationFallback.endpoint == "https://before.example/batch")
         precondition(aidictationFallback.model == "gpt-transcribe")
         precondition(aidictationFallback.apiKey == aidictation.transcriptionAPIKey)
+        var keylessSettings = settings
+        keylessSettings.apiKey = "not-needed"
+        let keylessRoute = capture(
+            keylessSettings,
+            provider: .aidictation,
+            transport: .realtime
+        ).batchRoute(provider: .aidictation, transport: .realtime)
+        precondition(keylessRoute.apiKey == "not-needed")
         precondition(realtime.usesShortRealtimeRecovery(isLiveRecording: true))
         precondition(!realtime.usesShortRealtimeRecovery(isLiveRecording: false))
         let offline = capture(
@@ -294,6 +302,8 @@ struct ValidateMacOSTranscriptionAttemptSnapshot {
         precondition(source.contains("return realtimeResult"))
         precondition(source.contains("snapshot.usesShortRealtimeRecovery(isLiveRecording: isLiveRecording)"))
         precondition(source.contains("rawText: rawResult,"))
+        precondition(source.contains("guard let transcriptionApiKey = batchRoute.apiKey,"))
+        precondition(!source.contains("transcriptionApiKey != \"not-needed\""))
         precondition(!attemptSource.contains("applyLLMPassWithFallback("))
         guard let recognitionEnd = source.range(of: "            let rawResult = try await withTimeout"),
               let cleanupAfterRecognition = source.range(

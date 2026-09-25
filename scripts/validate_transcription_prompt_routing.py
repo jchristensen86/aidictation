@@ -214,8 +214,10 @@ require(
     "AI Dictation chunked recognition has more than one cleanup owner",
 )
 require(
-    """if provider == .aidictation {
-                return try await applyLLMPassWithFallback(""" in mac_pipeline,
+    "try await milestones.acceptRaw(durableRaw)" in mac_pipeline
+    and "return durableRaw" in mac_pipeline
+    and "if realtimeResult == nil || snapshot.provider == .soniox" in app_state_source
+    and "result = try await applyLLMPassWithFallback(" in app_state_source,
     "AI Dictation batch transcription does not run client cleanup after raw recognition",
 )
 

@@ -2071,8 +2071,9 @@ class AppState: ObservableObject {
                 deadline: Date().addingTimeInterval(
                     TimeInterval(processingStoreDeadlineSeconds(
                         for: finalizedRecordingDuration,
-                        includesRealtimeFinish: activeTranscriptionSnapshot?.outputMode == .dictation
-                            && activeTranscriptionSnapshot?.transport == .realtime
+                        includesRealtimeFinish: activeTranscriptionSnapshot?.usesShortRealtimeRecovery(
+                            isLiveRecording: true
+                        ) == true
                     ))
                 )
             )
@@ -2209,10 +2210,11 @@ class AppState: ObservableObject {
                 realtimeResult = nil
             }
 
-            let recognitionTimeout = realtimeResult == nil && activeTransport == .realtime
+            let recognitionTimeout = realtimeResult == nil
+                && snapshot.usesShortRealtimeRecovery(isLiveRecording: isLiveRecording)
                 ? realtimeFallbackTimeoutSeconds(for: recording.duration)
                 : recognitionTimeoutSeconds(for: recording.duration)
-            let result = try await withTimeout(seconds: recognitionTimeout) {
+            let rawResult = try await withTimeout(seconds: recognitionTimeout) {
                 if realtimeResult == nil, snapshot.vadEnabled {
                     do {
                         let hasSpeech = try await VoiceActivityDetector.hasSpeech(
@@ -2244,23 +2246,6 @@ class AppState: ObservableObject {
                 if let realtimeResult {
                     try await session.checkpoint(realtimeResult)
                     try await session.markRawResultReady(realtimeResult)
-                    try await session.beginCleanup()
-                    if snapshot.provider == .soniox {
-                        let cleanupStartedAt = CFAbsoluteTimeGetCurrent()
-                        let cleaned = try await self.applyLLMPassWithFallback(
-                            rawText: realtimeResult,
-                            client: OpenAIClient(config: .init()),
-                            snapshot: snapshot
-                        )
-                        let cleanupMilliseconds = Int(
-                            (CFAbsoluteTimeGetCurrent() - cleanupStartedAt) * 1_000
-                        )
-                        DebugLog.info(
-                            "Soniox cleanup completed durationMs=\(cleanupMilliseconds) rawLength=\(realtimeResult.count) cleanedLength=\(cleaned.count)",
-                            context: "SonioxRealtime"
-                        )
-                        return cleaned
-                    }
                     return realtimeResult
                 }
                 return try await self.performTranscription(
@@ -2273,11 +2258,29 @@ class AppState: ObservableObject {
                     },
                     onRawTranscript: { text in
                         try await session.markRawResultReady(text)
-                    },
-                    onCleanupStarted: {
-                        try await session.beginCleanup()
                     }
                 )
+            }
+            try await session.beginCleanup()
+            let result: String
+            if realtimeResult == nil || snapshot.provider == .soniox {
+                let cleanupStartedAt = CFAbsoluteTimeGetCurrent()
+                result = try await applyLLMPassWithFallback(
+                    rawText: rawResult,
+                    client: OpenAIClient(config: .init()),
+                    snapshot: snapshot
+                )
+                if realtimeResult != nil {
+                    let cleanupMilliseconds = Int(
+                        (CFAbsoluteTimeGetCurrent() - cleanupStartedAt) * 1_000
+                    )
+                    DebugLog.info(
+                        "Soniox cleanup completed durationMs=\(cleanupMilliseconds) rawLength=\(rawResult.count) cleanedLength=\(result.count)",
+                        context: "SonioxRealtime"
+                    )
+                }
+            } else {
+                result = rawResult
             }
             try Task.checkCancellation()
             guard isCurrentAttempt(
@@ -3079,6 +3082,9 @@ class AppState: ObservableObject {
             transcriptionEndpoint: endpoint,
             transcriptionModel: model,
             transcriptionAPIKey: transcriptionAPIKey,
+            sonioxFallbackEndpoint: SecretsLoader.customTranscriptionEndpoint()
+                ?? TranscriptionProvider.aidictation.defaultEndpoint,
+            sonioxFallbackAPIKey: resolvedTranscriptionApiKey(for: .aidictation),
             customRealtimeEndpoint: configuredCustomRealtimeEndpoint(),
             customRealtimeModel: configuredCustomRealtimeModel(),
             llmPostProcessingEnabled: transcriptionProviderManager.enableLLMPostProcessing,
@@ -3155,22 +3161,21 @@ class AppState: ObservableObject {
         return languageCode
     }
 
-    /// Core transcription logic shared by live recording and re-transcription
+    /// Recognize complete raw text before the separate optional cleanup window.
     private func performTranscription(
         audioURL: URL,
         clipboardContent: String?,
         transientWorkspace: MacTransientWorkspace,
         snapshot: MacTranscriptionAttemptSnapshot,
         onRecognitionCheckpoint: @escaping @Sendable (String) async throws -> Void = { _ in },
-        onRawTranscript: @escaping @Sendable (String) async throws -> Void = { _ in },
-        onCleanupStarted: @escaping @Sendable () async throws -> Void = {}
+        onRawTranscript: @escaping @Sendable (String) async throws -> Void = { _ in }
     ) async throws -> String {
         let sttHintPrompt = snapshot.sttHintPrompt
         let transcriptionOptions = snapshot.transcriptionOptions
         let milestones = TranscriptionMilestoneForwarder(
             onCheckpoint: onRecognitionCheckpoint,
             onRaw: onRawTranscript,
-            onCleanup: onCleanupStarted
+            onCleanup: {}
         )
 
         let mode = snapshot.mode
@@ -3251,12 +3256,7 @@ class AppState: ObservableObject {
                 )
             }
             try await milestones.acceptRaw(durableRaw)
-            try await milestones.beginCleanup()
-            return try await applyLLMPassWithFallback(
-                rawText: durableRaw,
-                client: OpenAIClient(config: .init()),
-                snapshot: snapshot
-            )
+            return durableRaw
 
         case .realtime:
             DebugLog.warning("Realtime transport reached batch transcription path; using batch cloud fallback", context: "AppState")
@@ -3264,15 +3264,17 @@ class AppState: ObservableObject {
 
         case .batch:
             DebugLog.info("Using \(provider.displayName) batch transcription", context: "AppState")
-            guard let transcriptionApiKey = snapshot.transcriptionAPIKey else {
+            let batchRoute = snapshot.batchRoute(
+                provider: provider,
+                transport: transport
+            )
+            guard let transcriptionApiKey = batchRoute.apiKey,
+                  !transcriptionApiKey.isEmpty,
+                  transcriptionApiKey != "not-needed" else {
                 throw NSError(domain: "AppState", code: -1, userInfo: [NSLocalizedDescriptionKey: "Please set your \(provider.displayName) API key"])
             }
-            let batchEndpoint = provider == .soniox && transport == .realtime
-                ? TranscriptionProvider.aidictation.defaultEndpoint
-                : snapshot.transcriptionEndpoint
-            let batchModel = provider == .soniox && transport == .realtime
-                ? "soniox/stt-async-v5"
-                : snapshot.transcriptionModel
+            let batchEndpoint = batchRoute.endpoint
+            let batchModel = batchRoute.model
 
             let chatCompletionEndpoint: String
             let chatCompletionModel: String
@@ -3345,21 +3347,7 @@ class AppState: ObservableObject {
                 )
             }
             try await milestones.acceptRaw(durableRaw)
-            try await milestones.beginCleanup()
-
-            if provider == .aidictation {
-                return try await applyLLMPassWithFallback(
-                    rawText: durableRaw,
-                    client: client,
-                    snapshot: snapshot
-                )
-            }
-
-            return try await applyLLMPassWithFallback(
-                rawText: durableRaw,
-                client: client,
-                snapshot: snapshot
-            )
+            return durableRaw
         }
     }
 

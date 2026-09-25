@@ -19,11 +19,13 @@ enum TranscriptionProvider {
     case aidictation
     case custom
     case openAI
+    case soniox
 }
 
 enum TranscriptionTransport {
     case batch
     case local
+    case realtime
 }
 
 enum PostProcessingProvider {
@@ -45,16 +47,23 @@ private struct MutableAttemptSettings {
     var prompt = ["Before vocabulary"]
 }
 
-private func capture(_ settings: MutableAttemptSettings) -> MacTranscriptionAttemptSnapshot {
+private func capture(
+    _ settings: MutableAttemptSettings,
+    provider: TranscriptionProvider = .custom,
+    transport: TranscriptionTransport = .batch,
+    networkWasConnected: Bool = true
+) -> MacTranscriptionAttemptSnapshot {
     MacTranscriptionAttemptSnapshot(
         outputMode: .dictation,
         transcriptionOptions: .init(diarization: false),
         mode: .cloud,
-        provider: .custom,
-        transport: .batch,
+        provider: provider,
+        transport: transport,
         transcriptionEndpoint: settings.endpoint,
         transcriptionModel: settings.model,
         transcriptionAPIKey: settings.apiKey,
+        sonioxFallbackEndpoint: "https://before.example/batch",
+        sonioxFallbackAPIKey: "before-fallback-key",
         customRealtimeEndpoint: URL(string: settings.realtimeEndpoint),
         customRealtimeModel: settings.realtimeModel,
         // Custom-provider controls historically leave this hidden toggle off.
@@ -100,7 +109,7 @@ private func capture(_ settings: MutableAttemptSettings) -> MacTranscriptionAtte
         screenContext: "Before screen",
         vadEnabled: true,
         vadThreshold: settings.vadThreshold,
-        networkWasConnected: true
+        networkWasConnected: networkWasConnected
     )
 }
 
@@ -109,6 +118,31 @@ struct ValidateMacOSTranscriptionAttemptSnapshot {
     static func main() throws {
         var settings = MutableAttemptSettings()
         let snapshot = capture(settings)
+        var sonioxSettings = settings
+        sonioxSettings.apiKey = "not-needed"
+        let realtime = capture(sonioxSettings, provider: .soniox, transport: .realtime)
+        let fallback = realtime.batchRoute(provider: .soniox, transport: .realtime)
+        precondition(fallback.endpoint == "https://before.example/batch")
+        precondition(fallback.model == "soniox/stt-async-v5")
+        precondition(fallback.apiKey == "before-fallback-key")
+        precondition(fallback.apiKey != realtime.transcriptionAPIKey)
+        let aidictation = capture(settings, provider: .aidictation, transport: .realtime)
+        let aidictationFallback = aidictation.batchRoute(provider: .aidictation, transport: .realtime)
+        precondition(aidictationFallback.endpoint == "https://before.example/batch")
+        precondition(aidictationFallback.model == "gpt-transcribe")
+        precondition(aidictationFallback.apiKey == aidictation.transcriptionAPIKey)
+        precondition(realtime.usesShortRealtimeRecovery(isLiveRecording: true))
+        precondition(!realtime.usesShortRealtimeRecovery(isLiveRecording: false))
+        let offline = capture(
+            settings,
+            provider: .soniox,
+            transport: .realtime,
+            networkWasConnected: false
+        )
+        precondition(!offline.usesShortRealtimeRecovery(isLiveRecording: true))
+        let ordinary = snapshot.batchRoute(provider: .custom, transport: .batch)
+        precondition(ordinary.endpoint == snapshot.transcriptionEndpoint)
+        precondition(ordinary.apiKey == snapshot.transcriptionAPIKey)
 
         // Simulate every relevant manager changing after recording starts.
         settings.endpoint = "https://after.example/transcribe"
@@ -258,22 +292,21 @@ struct ValidateMacOSTranscriptionAttemptSnapshot {
         precondition(source.contains("try await session.markRawResultReady(realtimeResult)"))
         precondition(source.contains("try await session.beginCleanup()"))
         precondition(source.contains("return realtimeResult"))
-        guard let realtimeCheckpoint = source.range(
-            of: "try await session.markRawResultReady(realtimeResult)"
-        ),
-        let sonioxCleanup = source.range(
-            of: "rawText: realtimeResult,",
-            range: realtimeCheckpoint.upperBound..<source.endIndex
-        ) else {
-            preconditionFailure(
-                "Soniox realtime transcript did not reach cleanup after its durable raw checkpoint"
-            )
+        precondition(source.contains("snapshot.usesShortRealtimeRecovery(isLiveRecording: isLiveRecording)"))
+        precondition(source.contains("rawText: rawResult,"))
+        precondition(!attemptSource.contains("applyLLMPassWithFallback("))
+        guard let recognitionEnd = source.range(of: "            let rawResult = try await withTimeout"),
+              let cleanupAfterRecognition = source.range(
+                of: "            try await session.beginCleanup()",
+                range: recognitionEnd.upperBound..<source.endIndex
+              ),
+              let cleanupCall = source.range(
+                of: "result = try await applyLLMPassWithFallback(",
+                range: cleanupAfterRecognition.upperBound..<source.endIndex
+              ) else {
+            preconditionFailure("Cleanup is not separate from bounded recognition")
         }
-        precondition(
-            source[realtimeCheckpoint.upperBound..<sonioxCleanup.lowerBound]
-                .contains("if snapshot.provider == .soniox"),
-            "Realtime cleanup must remain limited to the two-stage Soniox path"
-        )
+        precondition(cleanupAfterRecognition.lowerBound < cleanupCall.lowerBound)
         precondition(
             !source.contains("applyReplacements(to:"),
             "Recognizer text is being transformed before the durable raw checkpoint"

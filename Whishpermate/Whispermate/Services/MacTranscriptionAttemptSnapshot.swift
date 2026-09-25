@@ -99,6 +99,8 @@ nonisolated struct MacTranscriptionAttemptSnapshot: @unchecked Sendable {
     let transcriptionEndpoint: String
     let transcriptionModel: String
     let transcriptionAPIKey: String?
+    let sonioxFallbackEndpoint: String
+    let sonioxFallbackAPIKey: String?
     let customRealtimeEndpoint: URL?
     let customRealtimeModel: String?
     let llmPostProcessingEnabled: Bool
@@ -123,6 +125,42 @@ nonisolated struct MacTranscriptionAttemptSnapshot: @unchecked Sendable {
     let vadEnabled: Bool
     let vadThreshold: Float
     let networkWasConnected: Bool
+
+    struct BatchRoute: Sendable {
+        let endpoint: String
+        let model: String
+        let apiKey: String?
+    }
+
+    func batchRoute(
+        provider: TranscriptionProvider,
+        transport: TranscriptionTransport
+    ) -> BatchRoute {
+        if provider == .soniox, transport == .realtime {
+            return BatchRoute(
+                endpoint: sonioxFallbackEndpoint,
+                model: "soniox/stt-async-v5",
+                apiKey: sonioxFallbackAPIKey
+            )
+        }
+        if provider == .aidictation, transport == .realtime {
+            return BatchRoute(
+                endpoint: sonioxFallbackEndpoint,
+                model: "gpt-transcribe",
+                apiKey: transcriptionAPIKey
+            )
+        }
+        return BatchRoute(
+            endpoint: transcriptionEndpoint,
+            model: transcriptionModel,
+            apiKey: transcriptionAPIKey
+        )
+    }
+
+    func usesShortRealtimeRecovery(isLiveRecording: Bool) -> Bool {
+        isLiveRecording && outputMode == .dictation && transport == .realtime
+            && networkWasConnected && !transcriptionOptions.diarization
+    }
 
     func withContext(
         appContext: String?,
@@ -166,6 +204,8 @@ nonisolated struct MacTranscriptionAttemptSnapshot: @unchecked Sendable {
             transcriptionEndpoint: transcriptionEndpoint,
             transcriptionModel: transcriptionModel,
             transcriptionAPIKey: transcriptionAPIKey,
+            sonioxFallbackEndpoint: sonioxFallbackEndpoint,
+            sonioxFallbackAPIKey: sonioxFallbackAPIKey,
             customRealtimeEndpoint: customRealtimeEndpoint,
             customRealtimeModel: customRealtimeModel,
             llmPostProcessingEnabled: llmPostProcessingEnabled,
